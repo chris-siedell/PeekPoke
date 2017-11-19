@@ -1,0 +1,187 @@
+======================================
+"PeekPoke v1.txt"
+24 May 2017 - Chris Siedell
+http://siedell.com/projects/PeekPoke/
+======================================
+
+
+PeekPoke is a tool for manipulating the hub RAM of a propeller chip from a PC.
+
+This document describes the protocol, which utilizes the PropCR command-response serial transport layer.
+
+
+Commands
+========
+
+The PC can send the following commands:
+
+command                                 |  returns on success
+----------------------------------------|-------------------------------
+readBytes(address, count)               |  data<uint8>[] of size count
+readWords(address, count)               |  data<uint16>[] of size count
+readLongs(address, count)               |  data<uint32>[] of size count
+writeBytes(address, data<uint8>[])      |  -
+writeWords(address, data<uint16>[])     |  -
+writeLongs(address, data<uint32>[])     |  -
+
+address is an unsigned integer with legal values of 0 to 65535.
+
+The count arguments for the read commands are unsigned integers and may be 1 to 65536 bytes, 1 to 32768 words, and 1 to 16384 longs.
+
+The data vectors for the write commands may not exceed 512 bytes, 256 words, and 128 longs.
+
+An implementation may not support all of these commands. An implementation may reject a command based on address if certain memory ranges are protected.
+
+
+Payload Format
+==============
+
+The format of the payload (as delivered by PropCR) has the following structure:
+
+|   header (3/4/8 bytes)  |  data (0-512 bytes)  |
+
+The data section is limited to 512 bytes for both commands and responses. This is why writes are limited to 512 bytes or equivalent. Read commands are not limited (except to the hub RAM/ROM size of 65536 bytes) -- as many intermediate responses will be sent as required to fulfill the command (128 total responses maximum).
+
+Byte ordering within the data section is little-endian. (The actual byte order in transmission may be different -- that is handled by PropCR, and is transparent to the higher-level protocol.)
+
+The payload header has a different format for commands and responses.
+
+
+Command Format
+==============
+
+A command header consists of eight bytes:
+
+| 0        | 1        | 2       | 3    | 4           | 5           | 6             | 7             |
+| 'P' 0x50 | 'P' 0x50 | details | 0x00 | address LSB | address MSB | countMOne LSB | countMOne MSB |
+
+Bytes 0, 1, and 3 must have the values shown.
+
+The details byte has the following format:
+
+    | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 | 
+    | 0 | 0 | 0 | 0 | 0 | A |   T   |
+
+Bits 3-7 must be 0.
+
+The T field describes the data type of the command and may have the following values:
+    T  =  0 - byte
+          1 - word
+          2 - long
+          
+The A field specifies the action of the command and may have the following values:
+    A  =  0 - read
+          1 - write
+
+The address is the starting hub address for the action, and may be any two byte value.
+
+countMOne is the count minus one. The count is the number of values to read or write. The actual number of bytes read or written depends on the data type and the count. For example, a writeLong command with a count of 100 will write 400 bytes worth of data.
+
+If the action is read then the data section must be empty. If the action is write the data section must contain the correct amount of data given the data type and the count.
+
+For reads the count must not exceed 65536 bytes, 32768 words, or 16384 longs.
+
+
+Response Format
+===============
+
+The response header consists of three or four bytes:
+
+| 0        | 1        | 2       | (3)                   |
+| 'P' 0x50 | 'P' 0x50 | details | responseNum/errorCode |
+
+Bytes 0 and 1 must have the values shown.
+
+The details byte has the following format:
+
+    | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 | 
+    | 1 | E | 0 | 0 | 0 | A |   T   |
+
+Bits 3-5 must be 0. Bit 7 must be 1.
+
+The T and A fields are a repeat of those fields from the original command. The E field indicates whether the response is an error response (0 for a normal response, 1 for an error response).
+
+The rest of this section considers only normal responses.
+
+A valid write command results in a single final responses, with a header of three bytes, and an empty data section.
+
+Fulfilling a read command will require 1 to 128 responses (128 responses * 512 bytes = hub size of 65536 bytes). Every read response has a four byte header which will be identical except for byte 3, the response number. Response numbering starts at 0, and will not exceed 127.
+
+All intermediate responses to a read command will have a data section of 512 bytes, 256 words, or 128 longs. The final response to a read command will have 1 to 512 bytes, 1 to 256 words, or 1 to 128 longs of data.
+
+The total number of responses required is given by the following formula:
+
+    numResponses = ceil( count * dataTypeSizeInBytes / 512 )
+
+The number of values in the final response for a given data are as follows:
+
+    numBytes = count % 512 
+    numWords = count % 256
+    numLongs = count % 128
+
+
+Error Responses
+===============
+
+The propeller may send error responses in some situations.
+
+If the initial two bytes of the payload are not 0x5050 and the payload size is less than four bytes then no response of any kind is sent. The following rules assume that these conditions are satisfied.
+
+If byte 3 of the command header is not 0x00, or if the command's details byte does not follow the format described above, then an UnsupportedCommand error response is sent. 
+
+(The rationale for the two paragraphs above is that any future revision of PeekPoke will always have a payload header of at least four bytes, starting with 0x5050.)
+
+If support for any of the commands has been removed (to reduce code size, for example) then such commands should result in a UnsupportedCommand error response.
+
+If the total payload size is less than eight bytes for either a read or write command a MissingArguments error response is sent.
+
+If the count of a write command is not consistent with the size of the data section then an InvalidArgument error response is sent. Likewise, if the data section of a read command is not empty then an InvalidArgument error response is sent.
+
+If the count of a read command exceeds 65536 bytes, 32768 words, or 16384 longs then a RangeError response is sent. This test is not optional for readWords and readLongs so that no more than 128 responses are sent.
+
+Writing to the ROM space is not considered an error (even though it does nothing).
+
+Having an unaligned address (e.g. not a multiple of four for a long value) is not considered an error. The lower bits are effectively ignored.
+
+An implementation may decide to refuse reading and writing based on address, in which case it should use the CommandProhibited error response. In these cases the command should be rejected entirely (no partial reads and writes).
+
+To reduce code size an implementation may substitute UnspecifiedError for any of the errors above.
+
+
+Error Response Format
+=====================
+
+Errors result in a single final response. Such a response has a four byte header (as described in the "Response Format" section), where the E field is 1. The data section is empty. The errorCode (byte 3) may have one of the following reserved values:
+
+UnspecifiedError        = 0
+UnsupportedCommand      = 1
+MissingArguments        = 2
+InvalidArgument         = 3
+RangeError              = 4
+CommandProhibited       = 5
+
+Implementations may define their own error codes starting at 32.
+
+
+Protocol Number
+===============
+
+The suggested protocol number is 0xAFAF. This is the complement of 0x5050 (i.e. "PP").
+
+
+Future Development
+==================
+
+Batch random access reads and writes would be very useful.
+
+The following commands might also be useful:
+byteFill(address, value, count)
+wordFill(address, value, count)
+longFill(address, value, count)
+byteMove(destAddress, srcAddress, count)
+wordMove(destAddress, srcAddress, count)
+longMove(destAddress, srcAddress, count)
+payloadExec(compiledCode)
+
+Adding EEPROM support is also a possibility.
+
