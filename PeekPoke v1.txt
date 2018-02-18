@@ -1,6 +1,6 @@
 ======================================
 "PeekPoke v1.txt"
-24 May 2017 - Chris Siedell
+18 Feb 2018 - Chris Siedell
 http://siedell.com/projects/PeekPoke/
 ======================================
 
@@ -113,11 +113,11 @@ The total number of responses required is given by the following formula:
 
     numResponses = ceil( count * dataTypeSizeInBytes / 512 )
 
-The number of values in the final response for a given data are as follows:
+The number of values in the final response for a given data type are as follows (assumes count is non-zero):
 
-    numBytes = count % 512 
-    numWords = count % 256
-    numLongs = count % 128
+    numBytes = count % 512; if numBytes == 0 then numBytes = 512
+    numWords = count % 256; if numWords == 0 then numWords = 256
+    numLongs = count % 128; if numLongs == 0 then numLongs = 128
 
 
 Error Responses
@@ -185,3 +185,9 @@ payloadExec(compiledCode)
 
 Adding EEPROM support is also a possibility.
 
+
+Document History
+================
+
+18 Feb 2018 - Corrected errors in the final response size formulas.
+24 May 2017 - Original document.

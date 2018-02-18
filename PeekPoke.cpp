@@ -90,9 +90,6 @@ public:
                 return;
             }
             
-            std::vector<uint32_t>* longs = static_cast<std::vector<uint32_t>*>(context);
-           
-
             parent.responseCount += 1;
 
             if (parent.responseCount > parent.expectedResponseCount) {
@@ -164,8 +161,10 @@ public:
             }
 
             if (isFinal && payload.size() != parent.numDataBytesInFinalResponse + 4) {
+                std::stringstream ss;
+                ss << "Incorrect final read response size (received " << payload.size() << " bytes, expected " << (parent.numDataBytesInFinalResponse + 4) << ").";
                 parent.errorOccurred = true;
-                parent.errorString = "Incorrect final read response size.";
+                parent.errorString = ss.str();
                 return;
             }
             
@@ -176,7 +175,7 @@ public:
             // at this point we've established that if this is an intermediate response, the data section is 512 bytes long
             // and if it is a final response, the data section has the expected length 
 
-            parent.readData.insert(parent.readData.begin(), payload.begin()+4, payload.end());
+            parent.readData.insert(parent.readData.end(), payload.begin()+4, payload.end());
             
         }
     
@@ -206,6 +205,28 @@ PeekPoke::~PeekPoke() {
     delete monitor;
 }
 
+std::string PeekPoke::getDeviceName() {
+    return propCR.getDeviceName();
+}
+
+uint32_t PeekPoke::getBaudrate() {
+    return propCR.getBaudrate();
+}
+
+void PeekPoke::setBaudrate(uint32_t _baudrate) {
+    propCR.setBaudrate(_baudrate);
+}
+
+uint8_t PeekPoke::getCrowAddress() {
+    return crowAddress;
+}
+
+void PeekPoke::setCrowAddress(uint8_t _address) {
+    if (_address == 0 || _address > 31) {
+        throw std::invalid_argument("The Crow protocol address must be 1 to 31.");
+    }
+    crowAddress = _address;
+}
 
 void PeekPoke::writeBytes(uint16_t address, const std::vector<uint8_t>& bytes) {
 
@@ -296,18 +317,32 @@ void PeekPoke::writeLongs(uint16_t address, const std::vector<uint32_t>& longs) 
     }
 }
 
+void PeekPoke::readBytes(uint16_t address, uint32_t count, std::vector<uint8_t>& bytes) {
 
-
-void PeekPoke::readBytes(uint16_t address, uint16_t count, std::vector<uint8_t>& bytes) {
-    throw std::runtime_error("Not implemented.");
-/*
+    // todo: implementing this via readLongs() introduces an unneccessary copy (as the data is
+    //  packed into uint32_t values)
+    
     if (count == 0) {
-        throw std::runtime_error("Count must be non-zero.");
+        throw std::invalid_argument("Count must be non-zero.");
+    }
+
+    if (count > 65536) {
+        throw std::invalid_argument("Reads are limited to 65536 bytes.");
     }
 
     uint16_t longAddr = address & (~0b11);
-    uint16_t lastLongAddr = (address + count) & (~0b11);
-    uint16_t longCount = lastLongAddr - longAddr + 1;
+    uint32_t lastLongAddr = (address + count - 1) & (~0b11);
+    uint32_t longCount = (lastLongAddr - longAddr)/4 + 1;
+
+    bool wrapAround = false;
+    if (longCount == 16385) {
+        // This situation can occur if 64KB (to within a long) are requested starting
+        //  at a non-long-aligned address. In this case the same long would be requested at the
+        //  beginning and the end. Since readLongs is limited to 16384 longs, we must
+        //  reuse the initial long for the final long.
+        longCount = 16384;
+        wrapAround = true;
+    }
 
     std::vector<uint32_t> longs;
 
@@ -315,17 +350,48 @@ void PeekPoke::readBytes(uint16_t address, uint16_t count, std::vector<uint8_t>&
 
     bytes.clear();
 
-
-    int numInitSyncBytes = 4 - (address - longAddr);
-    if (numInitSyncBytes > count) numInitSyncBytes = count;
-
-
-
-    for (int i = 0; i < numInitSyncBytes; ++i) {
-        bytes.push_back = longs[0];
-        longs[0] >> 8;
+    size_t numHeadBytes = (4 - (address - longAddr))%4; // the number of bytes before the first long-aligned address
+    if (numHeadBytes > count) {
+        // In this case the head bytes don't even reach the end of the first long.
+        // Example: requesting two bytes at a 1 (mod 4) address -- in this case the first and last bytes of the long are ignored.
+        // numTailBytes and numMiddleLongs will end up being zero.
+        numHeadBytes = count;
     }
-*/
+    size_t numTailBytes = (count - numHeadBytes)%4; // the number of remainder bytes (<4) after the last long-aligned address
+    size_t numMiddleLongs = (count - (numTailBytes + numHeadBytes))/4; // the number of full longs between the head and tail bytes
+
+    size_t index = 0;
+
+    if (numHeadBytes > 0) {
+        uint32_t head = longs[index++];
+        head >>= 8*(address - longAddr); // shift off bytes before address of interest
+        while (numHeadBytes > 0) {
+            bytes.push_back(head);
+            head >>= 8;
+            --numHeadBytes;
+        }
+    }
+
+    for (; numMiddleLongs > 0; --numMiddleLongs) {
+        uint32_t longValue = longs[index++];
+        bytes.push_back(longValue);
+        longValue >>= 8;
+        bytes.push_back(longValue);
+        longValue >>= 8; 
+        bytes.push_back(longValue);
+        longValue >>= 8;
+        bytes.push_back(longValue);
+    }
+
+    if (numTailBytes > 0) {
+        uint32_t tail = (wrapAround) ? longs[0] : longs[index];
+        while (numTailBytes > 0) {
+            bytes.push_back(tail);
+            tail >>= 8;
+            --numTailBytes;
+        }
+    }
+
 }
 
 void PeekPoke::readWords(uint16_t address, uint16_t count, std::vector<uint16_t>& words) {
@@ -334,12 +400,16 @@ void PeekPoke::readWords(uint16_t address, uint16_t count, std::vector<uint16_t>
 
 void PeekPoke::readLongs(uint16_t address, uint16_t count, std::vector<uint32_t>& longs) {
 
+    if (count == 0) {
+        throw std::invalid_argument("Count must be non-zero.");
+    }
+
     if (count > 16384) {
-        throw std::runtime_error("Reads are limited to 16384 longs.");
+        throw std::invalid_argument("Reads are limited to 16384 longs.");
     }
 
     if (address % 4 != 0) {
-        throw std::runtime_error("Long addresses must be multiples of four.");
+        throw std::invalid_argument("Long addresses must be multiples of four.");
     }
 
     payload.resize(8);
@@ -368,7 +438,11 @@ void PeekPoke::readLongs(uint16_t address, uint16_t count, std::vector<uint32_t>
     expectedResponseCount = ceil( count * 4.0 / 512.0);
     responseCount = 0;
 
+    // this calculation assumes count is non-zero
     numDataBytesInFinalResponse = (count * 4) % 512;
+    if (numDataBytesInFinalResponse == 0) {
+        numDataBytesInFinalResponse = 512;
+    }
 
     propCR.sendCommand(crowAddress, crowProtocol, payload, false, &longs);
 
@@ -381,7 +455,9 @@ void PeekPoke::readLongs(uint16_t address, uint16_t count, std::vector<uint32_t>
     int totalBytes = (expectedResponseCount - 1)*512 + numDataBytesInFinalResponse;
 
     if (totalBytes != readData.size()) {
-        throw std::runtime_error("Incorrect number of bytes read.");
+        std::stringstream ss;
+        ss << "Incorrect number of bytes read (expected " << totalBytes << ", received " << readData.size() << ").";
+        throw std::runtime_error(ss.str());
     }
     
     for (int i = 0; i < readData.size(); i += 4) { // should have already established that readData.size() % 4 == 0
