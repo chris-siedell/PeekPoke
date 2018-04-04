@@ -1,0 +1,14 @@
+
+*.swp
+.DS_Store
+*~
+*.binary
+
+/crow/
+
+*/__pycache__/
+
+*.pyc
+/dist/
+/*.egg-info
+

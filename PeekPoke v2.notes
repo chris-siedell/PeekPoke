@@ -1,0 +1,74 @@
+
+
+initial header, always 4 bytes:
+
+0x50, 0x70, commandCode (2-bytes)
+
+
+
+
+
+command                                
+
+getBasicInfo()                          | par, cogID, permissions
+readBytes(address, count)               | data<uint8_t>[] of size count
+writeBytes(address, data<uint8_t>[])    | -
+coginit(id, addr, par)                  | -
+cognew(addr, par)                       | id, or -1
+cogstop(id)                             | -
+
+command     | code      | args
+
+getInfo     |    | 0
+readBytes   |    | 2 bytes address, 1 byte countMinusOne (so up to 256 bytes per read)
+
+writeBytes  |    | 2 bytes address, 1 byte countMinusOne, count bytes
+
+pasmCogInit |    | 4 bytes exactly as pasm's coginit instruction requires
+cogstop     |    | 1 byte id
+
+readEEPROM
+writeEEPROM
+
+setClkmode
+
+
+command code
+bottom 5 bits determine the group
+top bit is always zero for command
+
+
+
+groups
+1 hub read
+2 hub write
+3 cog control
+
+cog control subgroup
+0 pasmCogInit
+1 cogStop
+
+
+ eeprom read
+ eeprom write
+ pin read
+ pin write
+ lock control
+ clock control
+ payload exec
+ sub-command
+ reserved
+
+error responses
+5 bytes
+0-3 the same as command, except bit 15 of commandCode is set
+byte 4 is error number
+
+error numbers
+0 NotAvailable
+1 NotPermitted
+2 NotImplemented
+3 MissingArguments
+4 InvalidArguments
+5 UnknownCommand
+
