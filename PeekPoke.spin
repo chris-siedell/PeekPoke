@@ -52,12 +52,15 @@ cImplementedGroups  = %1001
 cAllowedGroups      = %1111
 
 { PeekPoke error numbers. }
-cNotAvailable       = 0
-cNotAllowed         = 1
-cNotImplemented     = 2
-cMissingArguments   = 3
-cInvalidArguments   = 4
-cUnknownCommand     = 5
+cUnspecifiedError           = 1
+cPossibleIncorrectOrder     = 2
+cNotAvailable               = 3
+cNotPermitted               = 4
+cNotImplemented             = 5
+cMissingData                = 6
+cInvalidArguments           = 7
+cInvalidCommand             = 8
+cUnknownCommand             = 9
 
 
 var
@@ -531,29 +534,28 @@ sendBufferPointer       long    Payload     'potential nop if only lower 9 bits 
 { This is where PropCR code will jmp to when a valid user command packet has arrived.
   Refer to "PropCR-Fast User Guide.txt" for more information. }
 UserCode
-                                { All PeekPoke commands begin with at least four bytes of payload with the same format:
-                                    0x50, 0x70, code -- where code is a two-byte value in little-endian order. The
-                                    code's top bit must be 0. }
+                                { All PeekPoke commands begin with the same four byte initial header: 
+                                    0x50, 0x70, commandCode, and 0x00. If the command does not have an initial
+                                    header with this format we will send a Crow-level UnrecognizedCommand response. }
                                 cmp         payloadLength, #4           wc      'c=1 payload too short
-                        if_nc   mov         tmp1, Payload                       'tmp1 being used for scratch to test initial two bytes
-                        if_nc   shl         tmp1, #1                    wc, nr  'c=1 bad top bit
-                        if_nc   and         tmp1, kFFFF
-                        if_nc   cmp         tmp1, k7050                 wz      'z=0 wrong initial header bytes
-                    if_c_or_nz  jmp         #ReceiveCommand                     '...exit -- bad command initial header
+                                mov         tmp1, Payload
+                                and         tmp1, kFF00FFFF
+                                cmp         tmp1, k00007050             wz      'z=0 bad fixed bytes
+                    if_c_or_nz  jmp         #ReceiveCommand                     'todo: UnrecognizedCommand
 
                                 { After this point we assume the payload is a PeekPoke command. The response payload
-                                    will have the same initial four bytes as the command payload. }
+                                    will have the same initial four bytes as the command payload -- unless it is an
+                                    error response, in which case the fourth byte will be a non-zero error number. }
 
                                 { Extract the command code and see if that group is available (implemented and allowed). }
                                 mov         tmp0, Payload
                                 shr         tmp0, #16                           'tmp0 is command code
                                 mov         tmp1, #1
                                 shl         tmp1, tmp0                          'bottom 5 bits of code determine group
-                                test        tmp1, availableGroups       wc      'c=1 command is implemented and allowed
-                        if_nc   mov         errorCode, #cNotAvailable
-                        if_nc   jmp         #SendErrorResponse
+                                test        tmp1, availableGroups       wc      'c=1 group is implemented and allowed
+                        if_nc   jmp         #NotAvailable
 
-                                shr         tmp0, #5                    wz      'tmp0 is now command sub-group; z=1 sub-group is zero
+                                shr         tmp0, #5                    wz      'tmp0 is now sub-command within the group; z=1 sub-command is zero
 
                                 test        tmp1, #%0001                wc      'c=1 getBasicInfo()
                         if_c    jmp         #GetBasicInfo
@@ -564,11 +566,14 @@ UserCode
                                 test        tmp1, #%1000                wc      'c=1 cog control
                         if_c    jmp         #CogControl
 
-                                { This shouldn't happen. }
-                                jmp         #ReceiveCommand
+                        { We shouldn't get here -- it means a group was marked as implemented when it is not.
+                            So, fall through to NotAvailable. }
 
+NotAvailable                    mov         errorCode, #cNotAvailable
+                                jmp         #SendErrorResponse
 
-GetBasicInfo                    { The getBasicInfo response has the following format (all little-endian):
+GetBasicInfo            if_nz   jmp         #UnknownCommand                     'this group has only sub-command 0
+                                { The getBasicInfo response has the following format:
                                     0-3     - same as command
                                     4-5     - par
                                     6       - cogID
@@ -576,27 +581,19 @@ GetBasicInfo                    { The getBasicInfo response has the following fo
                                     8-11    - availableGroups }
                                 cogid       Payload+1
                                 shl         Payload+1, #16
-                                mov         tmp0, par
-                                add         tmp0, #28
-                                rdword      tmp0, tmp0
-                                or          Payload+1, tmp0                 'todo: stop faking par
+                                or          Payload+1, par
                                 mov         Payload+2, availableGroups
                                 mov         payloadLength, #12
                                 jmp         #SendFinalResponse
-
 
 HubReadWrite
                                 jmp         #ReceiveCommand
 
 
-
-
-CogControl  
-                        if_z    jmp         #_PasmCogInit                       'z from before jump (z=1 => tmp0==0)
+CogControl              if_z    jmp         #_PasmCogInit                       'z from before jump (z=1 => sub-command==0)
                                 cmp         tmp0, #1                    wz      'z=1 cogStop
                         if_z    jmp         #_CogStop
-                                mov         errorCode, #cUnknownCommand
-                                jmp         #SendErrorResponse
+                                jmp         #UnknownCommand
 
 _PasmCogInit
                                 { pasmCogInit command has 4 additional bytes which provide the information required
@@ -604,24 +601,24 @@ _PasmCogInit
                                     0-3     - same as command
                                     4       - cogID as written by coginit in lower bits, c-flag in bit 7 }
                                 cmp         payloadLength, #8           wc
-                        if_c    mov         errorCode, #cMissingArguments
-                        if_c    jmp         #SendErrorResponse
-                                coginit     Payload+1                   wc, wr  'c=1 no cog available
-                                jmp         #_CogControlDone
+                        if_c    jmp         #MissingData
+                                coginit     Payload+1                   wc, wr
+                                jmp         #_CogControlDone                    'cog control responses have common response format
 
 _CogStop
                                 { cogStop has one additional byte -- the id of the cog to stop. The return payload has
                                     five bytes:
                                     0-3     - same as command
                                     4       - cogID of cog stopped in lower bits, c-flag in bit 7 }
-                                cmp         payloadLength, #1           wc
-                        if_c    mov         errorCode, #cMissingArguments
-                        if_c    jmp         #SendErrorResponse
-                                cogstop     Payload+1                   wc, wr  'c=1 all cogs were running
+                                cmp         payloadLength, #5           wc
+                        if_c    jmp         #MissingData
+                                cogstop     Payload+1                   wc, wr
 
 _CogControlDone                 muxc        Payload+1, #%1000_0000
                                 mov         payloadLength, #5
                                 jmp         #SendFinalResponse 
+
+long 0[55]
                                 
 { *** }
 '
@@ -767,24 +764,34 @@ _CogControlDone                 muxc        Payload+1, #%1000_0000
 '                                jmp         #SendFinalResponse
 '
 
-{ Send Error Response
-  Usage:            mov     errorCode, #<errorCode>
-                    jmp     #SendErrorResponse
-  Error responses are to be sent only if the payload appears to be a valid PeekPoke command
-    with a valid initial four byte header. }
+
+{ MissingData (jmp)
+}
+MissingData                     mov         errorCode, #cMissingData
+                                jmp         #SendErrorResponse
+
+{ UnknownCommand (jmp)
+}
+UnknownCommand                  mov         errorCode, #cUnknownCommand
+                        
+                            { fall through to SendErrorResponse }
+
+{ SendErrorResponse (jmp)
+    Error responses are to be sent only if the payload appears to be a legitimate PeekPoke command
+  with a valid initial four byte header. Otherwise, use the Crow-level UnrecognizedCommand error response.
+    Usage:  mov     errorCode, #<errorCode>
+            jmp     #SendErrorResponse
+}
 SendErrorResponse
-                                or          Payload, kErrorBit
-                                mov         payloadLength, #5
+                                shl         errorCode, #24
+                                or          Payload, errorCode
+                                mov         payloadLength, #4
                                 jmp         #SendFinalResponse
 
 
 { Constants }
-k7050           long    $7050           '"pP"
-'k10000          long    $10000          '65536 = hub size
-kErrorBit       long    $8000_0000
-'kResponseBit    long    $80_0000        'bit 7 of byte 2
-'kOneInUpperByte long    $0100_0000
-'kOneInDField    long    $200
+kFF00FFFF       long    $FF00_FFFF
+k00007050       long    $0000_7050
 
 availableGroups     long    cImplementedGroups & cAllowedGroups
 
@@ -854,6 +861,7 @@ _txRemaining
 _rxRemaining    res
 
 tmp9v
+errorCode
 _initDeviceAddress
 _txCount
 _rxCountdown    res
@@ -861,5 +869,3 @@ _rxCountdown    res
 
 fit 496
 
-org Payload+1
-errorCode       res

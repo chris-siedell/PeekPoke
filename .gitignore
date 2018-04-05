@@ -4,7 +4,7 @@
 *~
 *.binary
 
-/crow/
+/python/crow/
 
 */__pycache__/
 
