@@ -56,7 +56,7 @@ readHub(address, count)
 
 Command code: 0x01 (group 1, command 0)
 
-Command payload, 4 bytes:
+Command payload, 8 bytes:
                     pos     len     description
                     0-3     4       initial header
                     4-5     2       hub address of read start, any alignment
@@ -181,6 +181,7 @@ will be non-zero:
     7 - InvalidArguments
     8 - InvalidCommand
     9 - UnknownCommand
+    10 - RequestTooLarge
     + - reserved, host should present as "Unknown Error" or "Unknown Error Number XX"
 
 The device implementation is free to choose any error number to describe an error.

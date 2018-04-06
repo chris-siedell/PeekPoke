@@ -41,14 +41,9 @@ conMuteFlag             = %0100_0000
 conAddressMask          = %0001_1111
 conMaxPayloadLength     = 4*conNumPayloadRegisters
 
-'These are the PeekPoke error codes:
-UnsupportedCommand  = 1
-MissingArguments    = 2
-InvalidArgument     = 3
-RangeError          = 4
 
 { These bitmasks determine which commands are availabled. }
-cImplementedGroups  = %1001
+cImplementedGroups  = %1111
 cAllowedGroups      = %1111
 
 { PeekPoke error numbers. }
@@ -61,6 +56,13 @@ cMissingData                = 6
 cInvalidArguments           = 7
 cInvalidCommand             = 8
 cUnknownCommand             = 9
+cRequestTooLarge            = 10
+
+{ PeekPoke command group masks. }
+cConstantInfo       = 1
+cHubRead            = 2
+cHubWrite           = 4
+cCogControl         = 8
 
 
 var
@@ -83,7 +85,7 @@ pub setParams(__rxPin, __txPin, __baudrate, __address) | __tmp
     __params[0] := __tmp >> 1                                                           'bitPeriod0
     __params[1] := __params[0] + (__tmp & 1)                                            'bitPeriod1 = bitPeriod0 + [0 or 1]
     __params[2] := (__params[0] >> 1) - 10 #> 5                                         'startBitWait (an offset used for receiving)
-    __params[3] := ((10*clkfreq) / __baudrate) - 5*__params[0] - 4*__params[1] + 1 + 2*__params[0]     'stopBitDuration (for sending; add extra bit period if required)
+    __params[3] := ((10*clkfreq) / __baudrate) - 5*__params[0] - 4*__params[1] + 1     'stopBitDuration (for sending; add extra bit period if required)
     
     __tmp <<= 3                                 '__tmp is now 16 bit periods, in clocks
     
@@ -538,9 +540,9 @@ UserCode
                                     0x50, 0x70, commandCode, and 0x00. If the command does not have an initial
                                     header with this format we will send a Crow-level UnrecognizedCommand response. }
                                 cmp         payloadLength, #4           wc      'c=1 payload too short
-                                mov         tmp1, Payload
-                                and         tmp1, kFF00FFFF
-                                cmp         tmp1, k00007050             wz      'z=0 bad fixed bytes
+                                mov         scratch, Payload
+                                and         scratch, kFF00FFFF
+                                cmp         scratch, k00007050          wz      'z=0 bad fixed bytes
                     if_c_or_nz  jmp         #ReceiveCommand                     'todo: UnrecognizedCommand
 
                                 { After this point we assume the payload is a PeekPoke command. The response payload
@@ -548,22 +550,22 @@ UserCode
                                     error response, in which case the fourth byte will be a non-zero error number. }
 
                                 { Extract the command code and see if that group is available (implemented and allowed). }
-                                mov         tmp0, Payload
-                                shr         tmp0, #16                           'tmp0 is command code
-                                mov         tmp1, #1
-                                shl         tmp1, tmp0                          'bottom 5 bits of code determine group
-                                test        tmp1, availableGroups       wc      'c=1 group is implemented and allowed
+                                mov         subcommand, Payload
+                                shr         subcommand, #16                     'at this point subcommand is command code
+                                mov         groupMask, #1
+                                shl         groupMask, subcommand               'bottom 5 bits of code determine group
+                                test        groupMask, availableGroups  wc      'c=1 group is implemented and allowed
                         if_nc   jmp         #NotAvailable
 
-                                shr         tmp0, #5                    wz      'tmp0 is now sub-command within the group; z=1 sub-command is zero
+                                shr         subcommand, #5              wz      'z=1 subcommand is zero
 
-                                test        tmp1, #%0001                wc      'c=1 getBasicInfo()
+                                test        groupMask, #%0001           wc      'c=1 getBasicInfo()
                         if_c    jmp         #GetBasicInfo
 
-                                test        tmp1, #%0110                wc      'c=1 readHub/writeHub
+                                test        groupMask, #%0110           wc      'c=1 readHub/writeHub
                         if_c    jmp         #HubReadWrite
 
-                                test        tmp1, #%1000                wc      'c=1 cog control
+                                test        groupMask, #%1000           wc      'c=1 cog control
                         if_c    jmp         #CogControl
 
                         { We shouldn't get here -- it means a group was marked as implemented when it is not.
@@ -586,12 +588,75 @@ GetBasicInfo            if_nz   jmp         #UnknownCommand                     
                                 mov         payloadLength, #12
                                 jmp         #SendFinalResponse
 
-HubReadWrite
-                                jmp         #ReceiveCommand
+HubReadWrite            if_nz   jmp         #UnknownCommand                     'both hub read and write have only sub-command 0
+
+                                { Both readHub and writeHub will have address and count arguments. }
+                                cmp         payloadLength, #8           wc
+                        if_c    jmp         #MissingData
+                                mov         address, Payload+1
+                                and         address, kFFFF
+                                mov         numBytes, Payload+1
+                                shr         numBytes, #16
+
+                                { Determine the number of longs necessary to completely cover the number of bytes (there
+                                    may be remainder bytes in the last long). }
+                                test        numBytes, #%11              wz      'z=1 integral number of longs
+                                mov         numLongs, numBytes
+                                shr         numLongs, #2
+                        if_nz   add         numLongs, #1
+
+                                test        groupMask, #cHubWrite       wc
+                        if_c    jmp         #_HubWrite
+
+_HubRead                        { hubRead will require 4 + count bytes in the response payload. Note: count may be zero. }
+                                mov         scratch, #4
+                                add         scratch, numBytes
+                                cmp         maxPayloadLength, scratch   wc      'c=1 response would exceed payload buffer
+                        if_c    jmp         #RequestTooLarge
+
+                                mov         payloadLength, #4
+                                add         payloadLength, numBytes
+
+                                cmp         numBytes, #0                wz      'z=1 count==0
+
+                        if_nz   movd        :setLong, #Payload+1
+:outerLoop              if_nz   mov         ind, #4
+                        if_nz   mov         y, #0
+:innerLoop              if_nz   rdbyte      x, address
+                        if_nz   add         address, #1
+                        if_nz   or          y, x
+                        if_nz   ror         y, #8
+                        if_nz   djnz        ind, #:innerLoop
+:setLong                if_nz   mov         0-0, y
+                        if_nz   add         :setLong, kOneInDField
+                        if_nz   djnz        numLongs, #:outerLoop
+
+                                jmp         #SendFinalResponse
+
+_HubWrite                       { hubWrite should have 8 + count bytes in the payload. Note: count may be zero. }
+                                mov         scratch, #8
+                                add         scratch, numBytes
+                                cmp         payloadLength, scratch      wc
+                        if_c    jmp         #MissingData
+
+                                movs        :getLong, #Payload+2
+:outerLoop                      mov         ind, #4
+                                max         ind, numBytes               wz      'z=1 no bytes left to write
+                        if_nz   sub         numBytes, ind
+:getLong                if_nz   mov         x, 0-0
+                        if_nz   add         :getLong, #1
+:innerLoop              if_nz   wrbyte      x, address
+                        if_nz   add         address, #1
+                        if_nz   ror         x, #8
+                        if_nz   djnz        ind, #:innerLoop
+                        if_nz   djnz        numLongs, #:outerLoop 
+
+                                mov         payloadLength, #4
+                                jmp         #SendFinalResponse 
 
 
 CogControl              if_z    jmp         #_PasmCogInit                       'z from before jump (z=1 => sub-command==0)
-                                cmp         tmp0, #1                    wz      'z=1 cogStop
+                                cmp         subcommand, #1              wz      'z=1 cogStop
                         if_z    jmp         #_CogStop
                                 jmp         #UnknownCommand
 
@@ -618,152 +683,13 @@ _CogControlDone                 muxc        Payload+1, #%1000_0000
                                 mov         payloadLength, #5
                                 jmp         #SendFinalResponse 
 
-long 0[55]
+long 0[8]
                                 
-{ *** }
-'
-'                                { response header (Payload register) is now ready; error responses
-'                                  will just need to set error bit and or-in the error code (or
-'                                  leave byte 3 at 0 for UnspecifiedError) }
-'
-'                                { send error response if previous reserved bits test failed,
-'                                  the z flag should be unchanged from that test }
-'                        if_nz   mov         errorCode, #UnsupportedCommand      '...reserved bits not zero (so unsupported command)
-'                        if_nz   jmp         #SendErrorResponse
-'
-'                                { the actions in v1 -- reading and writing -- require eight
-'                                  bytes for the header}
-'                                cmp         payloadLength, #8           wc
-'                        if_c    mov         errorCode, #MissingArguments        '...insufficient payload for arguments
-'                        if_c    jmp         #SendErrorResponse
-'
-'                                { parse byte 2 (details) 
-'                                  the T and A fields should still be the same after preparing
-'                                  the response header }
-'                                mov         dataType, Payload
-'                                shr         dataType, #16
-'                                and         dataType, #%11              wc, wz
-'                if_nc_and_nz    mov         errorCode, #UnsupportedCommand      '...T field = 3 is not supported
-'                if_nc_and_nz    jmp         #SendErrorResponse
-'                                mov         par, Payload
-'                                shr         par, #18                            'bit 2 of byte 2 is A field (action)
-'                                and         par, #1                     wc      'c=1 write, c=0 read
-'
-'                                { get the address argument }
-'                                mov         address, Payload+1
-'                                and         address, kFFFF
-'
-'                                { get the count argument }
-'                                mov         count, Payload+1
-'                                shr         count, #16
-'                                add         count, #1                           'argument in header is actually count minus one
-'                                                                                'count guaranteed to be 1 to 65536 by program logic
-'
-'                                { prepare to verify count -- determine request size in bytes }
-'                                mov         bytesRequested, count
-'                                shl         bytesRequested, dataType
-'
-'                                { verifying count depends on action }
-'                        if_c    jmp         #PerformWrite
-'
-'                            { fall through to PerformRead }
-'
-'{ Perform Read
-'  We still need to verify that the count request, in bytes, is less than the 2^16 limit. }
-'PerformRead
-'                                { verify count -- i.e. request is less than or equal to hub size }
-'                                cmp         bytesRequested, k10000      wc, wz
-'                if_nc_and_nz    mov         errorCode, #RangeError              '...request exceeds hub size
-'                if_nc_and_nz    jmp         #SendErrorResponse
-'                                { verify that data section for read command is empty }
-'                                cmp         payloadLength, #8           wz
-'                        if_nz   mov         errorCode, #InvalidArgument         '...the data section of read command must be empty
-'                        if_nz   jmp         #SendErrorResponse
-'
-'                                { at this point the header has been parsed and verified,
-'                                  what happens next depends on the data type }
-'                                cmp         dataType, #2                wz
-'                        if_z    jmp         #ReadLongs
-'
-'                                { only readLongs implemented at this time }
-'                                mov         errorCode, #UnsupportedCommand      '...readBytes and readWords unimplemented
-'                                jmp         #SendErrorResponse
-'
-'ReadLongs
-':outerLoop                      movd        :innerLoop, #Payload+1
-'                                mov         rdInnerCount, count                 'count guaranteed initially non-zero by program logic
-'                                max         rdInnerCount, #128
-'                                sub         count, rdInnerCount         wz
-'
-'                                { prepare payloadLength for response }
-'                                mov         payloadLength, rdInnerCount
-'                                shl         payloadLength, #2
-'                                add         payloadLength, #4
-'
-':innerLoop                      rdlong      0-0, address
-'                                add         address, #4
-'                                add         :innerLoop, kOneInDField
-'                                djnz        rdInnerCount, #:innerLoop
-'
-'                                { nothing left to send after this if z = 1 }
-'                        if_z    jmp         #SendFinalResponse
-'
-'                                call        #SendIntermediate
-'
-'                                add         Payload, kOneInUpperByte            'increment responseNum
-'                                jmp         #:outerLoop
-'
-'
-'{ Perform Write
-'  We still need to verify that the count is consistent with the payload length. }
-'PerformWrite
-'                                { verify count - for a write this means that the payload length
-'                                  equals the data section size (count * type size in bytes) plus
-'                                  the header size (eight bytes) }
-'                                add         bytesRequested, #8
-'                                cmp         bytesRequested, payloadLength       wz
-'                        if_nz   mov         errorCode, #InvalidArgument             '...payload length inconsistent with count
-'                        if_nz   jmp         #SendErrorResponse
-'
-'                                { at this point the header has been parsed and verified, and the
-'                                  write will be performed -- if implemented }
-'
-'                                { all write responses consist of three bytes -- the header bytes
-'                                  have already been prepared }
-'                                mov         payloadLength, #3
-'
-'                                { what happens next depends on the data type }
-'                                cmp         dataType, #2                        wz
-'                        if_z    jmp         #WriteLongs
-'                                cmp         dataType, #1                        wz
-'                        if_z    mov         errorCode, #UnsupportedCommand          '...writeWords unimplemented
-'                        if_z    jmp         #SendErrorResponse
-'
-'                            { fall through to WriteBytes }
-'
-'WriteBytes
-':outerLoop                      mov         wrBuff, Payload+2
-'                                add         :outerLoop, #1
-'                                mov         wrInnerCount, count             'count is guaranteed initially non-zero by program logic
-'                                max         wrInnerCount, #4
-'                                sub         count, wrInnerCount         wz
-':innerLoop                      wrbyte      wrBuff, address
-'                                shr         wrBuff, #8
-'                                add         address, #1
-'                                djnz        wrInnerCount, #:innerLoop
-'                        if_nz   jmp         #:outerLoop
-'                                movs        :outerLoop, #Payload+2          'reset for next time
-'                                jmp         #SendFinalResponse
-'
-'WriteLongs
-':loop                           wrlong      Payload+2, address
-'                                add         :loop, kOneInDField
-'                                add         address, #4
-'                                djnz        count, #:loop
-'                                movd        :loop, #Payload+2               'reset for next time
-'                                jmp         #SendFinalResponse
-'
+{ RequestTooLarge (jmp) 
 
+}
+RequestTooLarge                 mov         errorCode, #cRequestTooLarge
+                                jmp         #SendErrorResponse
 
 { MissingData (jmp)
 }
@@ -788,10 +714,10 @@ SendErrorResponse
                                 mov         payloadLength, #4
                                 jmp         #SendFinalResponse
 
-
 { Constants }
-kFF00FFFF       long    $FF00_FFFF
-k00007050       long    $0000_7050
+kFF00FFFF           long    $FF00_FFFF
+k00007050           long    $0000_7050
+kOneInDField        long    |< 9
 
 availableGroups     long    cImplementedGroups & cAllowedGroups
 
@@ -813,22 +739,23 @@ initShiftLimit      'The initialization shifting code will ignore registers at a
 { The following five temporaries -- registers 486 to 490 -- preserve their values during a Send* call. }
 
 tmp0
-address
+scratch
 _rxWait0        res
 
 tmp1
-count
+groupMask
 _rxWait1        res
 
 tmp2
-dataType
+subcommand
 _rxResetOffset  res
 
 tmp3
-bytesRequested
+address
 _rxOffset       res
 
 tmp4
+numBytes
 _initDeviceID
 _adminTmp               '_adminTmp must not alias a _tx* temporary
 _rxNextAddr     res
@@ -836,26 +763,27 @@ _rxNextAddr     res
 { The following five "v" temporaries -- registers 491 to 495 -- are undefined after a Send* call. }
 
 tmp5v
-wrBuff
+numLongs
 _rcvyPrevPhsb
 _initTmp
 _txF16L
 _rxF16L         res
 
 tmp6v
-rdInnerCount
-wrInnerCount
+x
 _rcvyCurrPhsb
 _initHub
 _txLong
 _rxLong         res
 
 tmp7v
+y
 _initRxPin
 _txF16U
 _rxLeftovers    res
 
 tmp8v
+ind
 _initTxPin
 _txRemaining
 _rxRemaining    res
