@@ -11,7 +11,7 @@ if len(sys.argv) < 2:
     sys.exit('Please provide the serial port name as a command line argument.')
 
 s = serial.Serial(sys.argv[1])
-s.baudrate = 230400
+s.baudrate = 460800
 
 h = crowhost.CrowHost()
 h.serial = s

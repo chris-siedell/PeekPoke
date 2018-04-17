@@ -1,598 +1,887 @@
 {
 ======================================
-PeekPoke
-Version 2 - in development
-April 2018
+"PeekPoke.spin"
+Version 0.3 (alpha/experimental)
+16 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
 ======================================
 
-PeekPoke is a tool for manipulating the hub RAM from a PC. This implementation is built
-using PropCR-Fast v0.1.
+  PeekPoke is a utility for reading and writing a Propeller's hub ram from a PC. It
+is entirely cog-contained after launch.
 
-This version is cog-contained, and does not require any hub space for data or code after
-initialization. It supports the writeBytes, writeLongs, and readLongs commands.
+  If the payloadExec feature is enabled, PeekPoke will allow the PC to execute
+arbitrary code. By default, hub reading and writing are enabled, but payloadExec
+is disabled.
 
-Usage: in spin, call setParams(), then init() or new().
+  Each PeekPoke instance requires a unique address on the serial line (addresses
+may be 1 to 31, 1 is the default). PeekPoke uses port 112 by default, but this
+may be changed.
 
-"PeekPoke v1.txt" describes the protocol.
+  The following methods are available to change the default settings before launch:
+    setPins(rxPin, txPin)
+    setBaudrate(baudrate) - MUST come before set*InBitPeriods
+    setInterbyteTimeoutInMS(milliseconds) - MUST follow setBaudrate
+    setInterbyteTimeoutInBitPeriods(count) - MUST follow setBaudrate
+    setRecoveryTimeInMS(milliseconds)
+    setRecoveryTimeInBitPeriods(count)
+    setBreakThresholdInMS(milliseconds) - MUST be called if setRecoveryTime* is called
+    setAddress(address)
+    setPort(port)
+    setAllowReadHub(bool)
+    setAllowWriteHub(bool)
+    setAllowPayloadExec(bool)
+
+  Setting the baudrate must come before setting the interbyte timeout or recovery time.
+
+  If the recovery time is set, then setBreakThresholdInMS must be called afterwards
+in order to recalculate the break multiple, regardless if the threshold has changed.
+
+  Calling the set* methods has no effect on launched instances.
+
+  start will not return until the new instance is completely loaded, so calling code
+may immediately prepare to launch another instance.
+  
+  start takes an argument that is passed to the new instance using the PAR register.
+The PC can use the getBasicInfo command to obtain its value. 
+
+  Since this implementation uses PropCR, make sure to use PropCR byte ordering when
+sending a command. With PyCrow, this can be done with the 'propcr_order=True' 
+argument to send_command.
+
+  This file was originally built using PropCR-BD version 0.2 (16 April 2018).
 }
-
 
 con
-
-{ conNumPayloadRegisters determines the size of the payload buffer. This buffer is where PropCR
-    puts received command payloads. It is also where PropCR sends response payloads from unless
-    sendBufferPointer is changed (by default it points to Payload).
- Due to the requirement that bitPeriod0 must be at an even-addressed register this number must
-    be even, otherwise transmitting will fail with weird looking framing errors. }
-
-'PeekPoke: 130 = 520 bytes = 512 bytes data and 8 bytes header
-conNumPayloadRegisters  = 130       'Important: this MUST be an even number.
-
-{ conUserProtocol identifies the user protocol number that PropCR will listen for. This number must
-    match the protocol number sent with user commands from the PC. }
-
-'PeekPoke: $AFAF = complement of $5050 ("PP")
-conUserProtocol         = $AFAF     'Must be two byte value.
-
-'These constants are used in the code.
-conMuteFlag             = %0100_0000
-conAddressMask          = %0001_1111
-conMaxPayloadLength     = 4*conNumPayloadRegisters
-
-
-{ These bitmasks determine which commands are availabled. }
-cImplementedGroups  = %1111
-cAllowedGroups      = %1111
-
-{ PeekPoke error numbers. }
-cUnspecifiedError           = 1
-cPossibleIncorrectOrder     = 2
-cNotAvailable               = 3
-cNotPermitted               = 4
-cNotImplemented             = 5
-cMissingData                = 6
-cInvalidArguments           = 7
-cInvalidCommand             = 8
-cUnknownCommand             = 9
-cRequestTooLarge            = 10
-
-{ PeekPoke command group masks. }
-cConstantInfo       = 1
-cHubRead            = 2
-cHubWrite           = 4
-cCogControl         = 8
-
+    
+    { Compile-Time Constants
+        cNumPayloadRegisters determines the size of the payload buffer. This buffer is where PropCR
+      puts received command payloads. It is also where PropCR sends response payloads from, unless
+      sendBufferPointer is changed (by default it points to Payload).
+    }
+    cNumPayloadRegisters    = 66  'Must be 66 for PeekPoke. 'MUST be even. Needs to be large enough for initialization code.
+    cMaxPayloadSize = 4*cNumPayloadRegisters
+    
+    { Default Settings
+        These settings may be changed before cog launch -- see Spin methods.
+    }
+    cClkfreq                    = 80_000_000    'used just for calculating derived default settings
+    cRxPin                      = 31            'must be 0-31
+    cTxPin                      = 30            'must be 0-31
+    cBaudrate                   = 115200        'the minimum supported bit period (clkfreq/baudrate) is 26 clocks
+    cInterbyteTimeoutInMS       = 1
+    cRecoveryTimeInBitPeriods   = 16            'recoveryTime should be greater than a byte period
+    cBreakThresholdInMS         = 150
+    cAddress                    = 1             'must be 1-31
+    cUserPort                   = 112           'PeekPoke uses 112 by default 'must be a one-byte value other than 0, recommended to use 32+
+    
+    { Derived Default Settings }
+    cTwoBitPeriod = (2*cClkfreq) / cBaudrate
+    cBitPeriod0 = cTwoBitPeriod >> 1
+    cBitPeriod1 = cBitPeriod0 + (cTwoBitPeriod & 1) 
+    cStartBitWait = (cBitPeriod0 >> 1) - 10 #> 5
+    cStopBitDuration = ((10*cClkfreq) / cBaudrate) - 5*cBitPeriod0 - 4*cBitPeriod1 + 1
+    cTimeout = (cClkfreq/1000) * cInterbyteTimeoutInMS
+    cRecoveryTime = cBitPeriod0 * cRecoveryTimeInBitPeriods
+    cBreakMultiple = ((cClkfreq/1000) * cBreakThresholdInMS) / cRecoveryTime #> 1
+    
+    { Flags and Masks for packetInfo (which is CH2). }
+    cRspExpectedFlag        = $80
+    cAddressMask            = %0001_1111
+    
+    { Crow error response types. }
+    cUnspecifiedError       = 0
+    cDeviceUnavailable      = 1
+    cDeviceIsBusy           = 2
+    cCommandTooLarge        = 3
+    cCorruptPayload         = 4
+    cPortNotOpen            = 5
+    cLowResources           = 6
+    cUnknownProtocol        = 7
+    cRequestTooLarge        = 8
+    cImplementationFault    = 9
+    cServiceFault           = 10
+    
+    { Crow admin error status numbers. }
+    cAdminCommandNotAvailable   = 1
+    cAdminMissingParameters     = 2
+    
+    { Special Purpose Registers
+        To save space, PropCR makes use of some special purpose registers. The following SPRs are used for
+      variables and temporaries: sh-par, sh-cnt, sh-ina, sh-inb, outb, dirb, vcfg, and vscl.
+        The "_SH" suffix is a reminder to always used the variable/temporary as a destination register.
+        PropCR uses the counter B module in RecoveryMode (when waiting for rx line idle or detecting breaks).
+        PropCR never uses the counter A module or its registers -- it leaves it free for custom use.
+        PropCR does not use the actual PAR register (only the shadow register), so it is free for custom use.
+    }
+    _txWait_SH          = $1f0  'sh-par
+    _rxPort_SH          = $1f0  'sh-par
+    
+    _txByteNum_SH       = $1f1  'sh-cnt
+    _rxTmp_SH           = $1f1  'sh-cnt
+    
+    _txBitCountdown_SH  = $1f2  'sh-ina
+    _rxCH0inc_SH        = $1f2  'sh-ina - CH0 (incomplete -- does not include bit 7) is saved in-loop for reserved bits testing
+   
+    _rxF16U_SH          = $1f3  'sh-inb
+    
+    token               = $1f5  'outb - token is assigned in the recieve loop; this register is also used for composing the response header (unsuitable as nop)
+    packetInfo          = $1f7  'dirb -  packetInfo is CH2; potential nop; upper bytes always set to 0 (from _rxByte)
+    sendBufferPointer   = $1fe  'vcfg - (video generator is off if bits 29-30 are zero); points to Payload (0) by default; should always be 9-bit value; potential nop
+    
+    'Important: the upper bytes of _rxByte (i.e. VSCL) must be zero before ReceiveCommand is executed.
+    _txByte             = $1ff  'vscl - same as for _rxByte (upper bytes temporarily non-zero until masked, so not suitable for vcfg or ctrx, but ok to alias _rxByte)
+    _rxByte             = $1ff  'vscl - important: it is assumed the upper bytes of this register are always zero (required for F16 calculation)
+    
 
 var
+    long __twoBitPeriod
 
-    long    __params[8]
+pub setPins(__rxPin, __txPin)
+    rxMask := |< __rxPin
+    txMask := |< __txPin
+    rcvyLowCounterMode := (rcvyLowCounterMode & $ffff_ffe0) | (__rxPin & $1f)
 
+pub setBaudrate(__baudrate)
+    __twoBitPeriod := (clkfreq << 1) / __baudrate #> 52
+    bitPeriod0 := __twoBitPeriod >> 1
+    bitPeriod1 := bitPeriod0 + (__twoBitPeriod & 1)
+    startBitWait := (bitPeriod0 >> 1) - 10 #> 5
+    stopBitDuration := ((10*clkfreq) / __baudrate) - 5*bitPeriod0 - 4*bitPeriod1 + 1
 
-{
-setParams(rxPin, txPin, baudrate, address)
-Call before init() or new().
-Parameters:
-    rxPin, txPin - the sending and receiving pins, which may be the same pin
-    baudrate - desired baudrate (e.g. 115200, 3_000_000)
-    address - device address (must be 1-31); commands must be sent to this address if not broadcast
-}
-pub setParams(__rxPin, __txPin, __baudrate, __address) | __tmp
-    
-    __tmp := ( 2 * clkfreq ) / __baudrate       '__tmp is now 2 bit periods, in clocks
-    
-    __params[0] := __tmp >> 1                                                           'bitPeriod0
-    __params[1] := __params[0] + (__tmp & 1)                                            'bitPeriod1 = bitPeriod0 + [0 or 1]
-    __params[2] := (__params[0] >> 1) - 10 #> 5                                         'startBitWait (an offset used for receiving)
-    __params[3] := ((10*clkfreq) / __baudrate) - 5*__params[0] - 4*__params[1] + 1     'stopBitDuration (for sending; add extra bit period if required)
-    
-    __tmp <<= 3                                 '__tmp is now 16 bit periods, in clocks
-    
-    __params[4] := __tmp                                                                'timeout, in clocks; see "The Interbyte Timeout" in User Guide
-    
-    'The default 16 bit period timeout above is based on the assumption that the PC's command 
-    ' packet will be received in a steady stream, with no pauses between bytes. If this assumption
-    ' is not true then the timeout may be defined in milliseconds, as shown below.
-    'See "The Interbyte Timeout" section of the User Guide for more details.
-    '__params[4] := (clkfreq/1000) * <non-zero number of milliseconds>    'timeout set using milliseconds
-    
-    __params[5] := __tmp                                                                'recoveryTime (in clocks; see "Recovery Mode" in User Guide)
-    __params.byte[24] := __txPin
-    __params.byte[25] := __rxPin
-    __params.byte[26] := __address
+pub setInterbyteTimeoutInMS(__milliseconds)
+    timeout := __milliseconds*(clkfreq/1000) #> __twoBitPeriod
 
+pub setInterbyteTimeoutInBitPeriods(__count)
+    timeout := __count*bitPeriod0 #> __twoBitPeriod
 
-{
-new()
-Call setParams() first.
-Starts an instance using cognew. Calls to setParams() have no effect after this call.
-}
-pub new(newPar)
-    
-    __params.word[14] := newPar
-    cognew(@Payload, @__params)
-    waitcnt(cnt + 10000)            'wait for cog to load params
+pub setRecoveryTimeInMS(__milliseconds)
+    recoveryTime := __milliseconds*(clkfreq/1000)
 
+pub setRecoveryTimeInBitPeriods(__count)
+    recoveryTime := __count*bitPeriod0
 
-{
-init(id)
-Call setParams() first.
-Starts an instance using coginit and the provided cog ID. Calls to setParams() have no effect
-after this call.
-}
-pub init(__id) 
-    
-    coginit(__id, @Payload, @__params)
-    waitcnt(cnt + 10000)            'wait for cog to load params
+pub setBreakThresholdInMS(__milliseconds)
+    breakMultiple := (__milliseconds*(clkfreq/1000)) / recoveryTime #> 2
+
+pub setAddress(__address)
+    _RxCheckAddress := (_RxCheckAddress & $ffff_ffe0) | (__address & $1f)
+
+pub setPort(__port)
+    _AdminOpenPortsList := (_AdminOpenPortsList & $ffff_ff00) | (__port & $ff)
+    _AdminCheckUserPort := (_AdminCheckUserPort & $ffff_ff00) | (__port & $ff)
+    _RxCheckUserPort := (_RxCheckUserPort & $ffff_ff00) | (__port & $ff)
+
+pub setAllowReadHub(__allow)
+    if __allow
+        availableCmds |= %0000_0010
+    else
+        availableCmds &= %0000_1101
+
+pub setAllowWriteHub(__allow)
+    if __allow
+        availableCmds |= %0000_0100
+    else
+        availableCmds &= %0000_1011
+
+pub setAllowPayloadExec(__allow)
+    if __allow
+        availableCmds |= %0000_1000
+    else
+        availableCmds &= %0000_0111
+
+pub start(__par)
+    result := cognew(@Init, __par) + 1
+    waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
 
 
 dat
-org 0
-
 
 { ==========  Begin Payload Buffer and Initialization  ========== }
 
-
+{ Payload and Init
+    The payload buffer is where PropCR will put received payloads. It is also where it will send
+  response payloads from unless sendBufferPointer is changed.
+    The payload buffer is placed at the beginning of the cog for two reasons:
+        - this is a good place to put one-time initialization code, and
+        - having a fixed location is convenient for executing compiled code sent as a payload.
+    Since the initialization code may not take up the entire buffer, shifting code is included that
+  will shift the permanent code into place. This prevents wasting excessive hub space with an empty buffer.
+}
+org 0
+Init
 Payload
-                                { First, shift everything starting from ReceiveCommand and up into place. 
-                                    This is done so that having the payload buffer at the start of the
-                                    cog doesn't waste excessive hub space. Assumptions:
-                                    - initEnd+1 contains the first unshifted instruction of ReceiveCommand.
-                                    - All addresses starting from initShiftLimit and up are res'd
-                                      and are not shifted. }
-                                mov         inb, #initShiftLimit - ReceiveCommand
-initShift                       mov         initShiftLimit-1, initShiftLimit-1-(ReceiveCommand - (initEnd + 1))
+                                { First, shift everything into place. Assumptions:
+                                    - The actual content (not address) of the register after initEnd is initShiftStart (nothing
+                                      but org and res'd registers between them).
+                                    - All addresses starting from initShiftLimit and up are res'd and are not shifted. }
+                                mov         _initCount, #initShiftLimit - initShiftStart
+initShift                       mov         initShiftLimit-1, initShiftLimit-1-(initShiftStart - (initEnd + 1))
                                 sub         initShift, initOneInDAndSFields
-                                djnz        inb, #initShift
+                                djnz        _initCount, #initShift
 
-                                { Get settings from hub. }
-                                mov         _initHub, par
+                                { As originally written, this implementation will include "P8X32A (cog N)" as the
+                                    device description in response to a getDeviceInfo admin command. Here we
+                                    determine the 'N'. }
+                                cogid       _initTmp
+                                shl         _initTmp, #8
+                                add         getDeviceInfoCogNum, _initTmp
 
-                                { The first six settings can be stored via loop. }
-                                mov         inb, #6
-initHubLoop                     rdlong      bitPeriod0, _initHub
-                                add         initHubLoop, initOneInDField
-                                add         _initHub, #4
-                                djnz        inb, #initHubLoop
-
-                                { Most of the remaining settings will require processing. }
-                                rdbyte      _initTxPin, _initHub
-                                add         _initHub, #1
-                                rdbyte      _initRxPin, _initHub
-                                add         _initHub, #1
-                                rdbyte      _initDeviceAddress, _initHub
-
-                                { ctrb setup - used in recovery mode }
-                                movs        rcvyLowCounterMode, _initRxPin
+                                { Misc. }
                                 mov         frqb, #1
+                                or          outa, txMask                            'prevent glitch when retaining tx line for first time
 
-                                { rx mask }
-                                mov         rxMask, #1
-                                shl         rxMask, _initRxPin
-
-                                { tx mask }
-                                mov         txMask, #1
-                                shl         txMask, _initTxPin
-                                or          outa, txMask            'must occur before making tx an output
-
-                                { device address }
-                                movs        rxVerifyAddress, _initDeviceAddress
+                                { PeekPoke Initialization }
+                                mov         BreakHandlerAddr, #DefaultBreakHandler
+                                mov         SendResponseAddr, #SendResponse
+                                mov         SendErrorResponseAddr, #SendErrorResponse
+                                mov         SendResponseAndReturnAddr, #SendResponseAndReturnProxy
+                                mov         ReceiveCommandAddr, #ReceiveCommand
 
                                 jmp         #ReceiveCommand
 
+
+{ initEnd is the last real (not reserved) register before initShiftStart. Its address is used by the initialization shifting code. }
+initEnd
 initOneInDAndSFields            long    $201
 
-{ initEnd is the last real (not reserved) register before the first unshifted register of the
-    ReceiveCommand routine. Its address is used by the initialization shifting code. }
-initEnd
-initOneInDField                 long    $200
-
-
-fit conNumPayloadRegisters      'If this fails then the payload buffer is too small for the initialization code.
-org conNumPayloadRegisters
-
+fit cNumPayloadRegisters 'On error: not enough room for init code.
+org cNumPayloadRegisters
 
 { ==========  Begin PropCR Block  ========== }
 
+{   It is possible to place res'd registers here (between initEnd and initShiftStart) -- the shifting
+  code will accommodate them. However, bitPeriod0 must always be at an even address register. }
 
-{ Settings }
-{ It is almost always an error to have res'd symbols before real instructions or data, but
-    in this case it is correct -- the shifting code at the beginning takes it into account. }
-bitPeriod0              res     'bitPeriod0 must be at even address (see txBitX)
-bitPeriod1              res     'bitPeriod1 must immediately follow bitPeriod0
-startBitWait            res
-stopBitDuration         res
-timeout                 res
-recoveryTime            res
-                                'userProtocol stored as nop elsewhere (set at compile time)
-                                'userProtocol also stored in byte swapped form in adminGetDeviceInfoBuffer
-txMask                  res
-rxMask                  res     'rx pin number also stored in s-field of rcvyLowCounterMode
-                                'deviceAddress stored in s-field of rxVerifyAddress
-
-
-{ Other Res'd Variables }
-token                   res     'potential nop; one byte value
-packetInfo              res     'potential nop; upper bytes always set to 0
-payloadLength           res     'potential nop; 11 bit value
+{ Settings Notes
+    The following registers store some settings. Some settings are stored in other locations (within
+  instructions in some cases), and some are stored in multiple locations.
+}
+initShiftStart
+bitPeriod0              long    cBitPeriod0
+bitPeriod1              long    cBitPeriod1
+startBitWait            long    cStartBitWait 
+stopBitDuration         long    cStopBitDuration
+timeout                 long    cTimeout
+recoveryTime            long    cRecoveryTime
+breakMultiple           long    cBreakMultiple
+rxMask                  long    |< cRxPin           'rx pin also stored in rcvyLowCounterMode
+txMask                  long    |< cTxPin
 
 
-{ Receive Command 1 - Start }
-{ The first instruction of ReceiveCommand must occupy the register at initEnd+1 (before shifting),
-    so there must be nothing but res'd symbols in between. }
+{ ReceiveCommand (jmp)
+    This routine waits for a command and then processes it in ReceiveCommandFinish. It makes use
+  of instructions that are shifted into the receive loop (see 'RX Parsing Instructions' and
+  'RX StartWait Instructions').
+}
 ReceiveCommand
+                                { Pre-loop initialization. }
                                 mov         _rxWait0, startBitWait                  'see page 99
-                                mov         rxStartWait, rxContinue
-                                movs        rxMovA, #rxH0
-                                movs        rxMovB, #rxH0+1
-                                movs        rxMovC, #rxH0+2
+                                mov         _RxStartWait, rxContinue
+                                movs        _RxMovA, #rxFirstParsingGroup
+                                movs        _RxMovB, #rxFirstParsingGroup+1
+                                movs        _RxMovC, #rxFirstParsingGroup+2
                                 mov         _rxResetOffset, #0
+
+                                { Wait for start bit edge. }
                                 waitpne     rxMask, rxMask
                                 add         _rxWait0, cnt
+
+                                { Sample start bit. }
                                 waitcnt     _rxWait0, bitPeriod0
                                 test        rxMask, ina                     wc      'c=1 framing error; c=0 continue, with reset
                         if_c    jmp         #RecoveryMode
-                                { the receive loop - c=0 reset parser}
-rxBit0                          waitcnt     _rxWait0, bitPeriod1
+
+                                { The receive loop -- c=0 will reset parser. }
+_RxLoopTop
+:bit0                           waitcnt     _rxWait0, bitPeriod1
                                 testn       rxMask, ina                     wz
                         if_nc   mov         _rxF16L, #0                             'F16 1 - see page 90
-                        if_c    add         _rxF16L, rxByte                         'F16 2
+                        if_c    add         _rxF16L, _rxByte                        'F16 2
                         if_c    cmpsub      _rxF16L, #255                           'F16 3
-                                muxz        rxByte, #%0000_0001
-rxBit1                          waitcnt     _rxWait0, bitPeriod0
+                                muxz        _rxByte, #%0000_0001
+
+:bit1                           waitcnt     _rxWait0, bitPeriod0
                                 testn       rxMask, ina                     wz
-                                muxz        rxByte, #%0000_0010
-                        if_nc   mov         inb, #0                                 'F16 4 - inb is upper rxF16
-                        if_c    add         inb, _rxF16L                            'F16 5
-                        if_c    cmpsub      inb, #255                               'F16 6
-rxBit2                          waitcnt     _rxWait0, bitPeriod0
+                                muxz        _rxByte, #%0000_0010
+                        if_nc   mov         _rxF16U_SH, #0                          'F16 4
+                        if_c    add         _rxF16U_SH, _rxF16L                     'F16 5
+                        if_c    cmpsub      _rxF16U_SH, #255                        'F16 6
+
+:bit2                           waitcnt     _rxWait0, bitPeriod1
                                 testn       rxMask, ina                     wz
-                                muxz        rxByte, #%0000_0100
+                                muxz        _rxByte, #%0000_0100
                         if_nc   mov         _rxOffset, _rxResetOffset               'Shift 1 - see page 93
                                 subs        _rxResetOffset, _rxOffset               'Shift 2
-                                adds        rxMovA, _rxOffset                       'Shift 3
-rxBit3                          waitcnt     _rxWait0, bitPeriod0
+                                adds        _RxMovA, _rxOffset                      'Shift 3
+
+:bit3                           waitcnt     _rxWait0, bitPeriod0
                                 testn       rxMask, ina                     wz
-                                muxz        rxByte, #%0000_1000
-                                adds        rxMovB, _rxOffset                       'Shift 4
-                                adds        rxMovC, _rxOffset                       'Shift 5
+                                muxz        _rxByte, #%0000_1000
+                                adds        _RxMovB, _rxOffset                      'Shift 4
+                                adds        _RxMovC, _rxOffset                      'Shift 5
                                 mov         _rxOffset, #3                           'Shift 6
-rxBit4                          waitcnt     _rxWait0, bitPeriod0
+
+:bit4                           waitcnt     _rxWait0, bitPeriod1
                                 testn       rxMask, ina                     wz
-                                muxz        rxByte, #%0001_0000
-rxMovA                          mov         rxShiftedA, 0-0                         'Shift 7
-rxMovB                          mov         rxShiftedB, 0-0                         'Shift 8
-rxMovC                          mov         rxShiftedC, 0-0                         'Shift 9
-rxBit5                          waitcnt     _rxWait0, bitPeriod0
+                                muxz        _rxByte, #%0001_0000
+_RxMovA                         mov         _RxShiftedA, 0-0                        'Shift 7
+_RxMovB                         mov         _RxShiftedB, 0-0                        'Shift 8
+_RxMovC                         mov         _RxShiftedC, 0-0                        'Shift 9
+
+:bit5                           waitcnt     _rxWait0, bitPeriod0
                                 testn       rxMask, ina                     wz
-                                muxz        rxByte, #%0010_0000
+                                muxz        _rxByte, #%0010_0000
                                 mov         _rxWait1, _rxWait0                      'Wait 2
                                 mov         _rxWait0, startBitWait                  'Wait 3
-                        if_nc   mov         _rxCountdown, #511                      'Countdown 1
-rxBit6                          waitcnt     _rxWait1, bitPeriod1
+                                sub         _rxCountdown, #1                wz      'Countdown (undefined on reset)
+
+:bit6                           waitcnt     _rxWait1, bitPeriod1
                                 test        rxMask, ina                     wc
-                                muxc        rxByte, #%0100_0000
-                                sub         _rxCountdown, #1                wz      'Countdown 2
-rxShiftedA                      long    0-0                                         'Shift 10
-                                shl         _rxLong, #8                             'Buffering 1
-rxBit7                          waitcnt     _rxWait1, bitPeriod0
+                                muxc        _rxByte, #%0100_0000
+                        if_nc   mov         _rxCH0inc_SH, _rxByte                   'save CH0 (up through bit 6) for reserved bits testing
+_RxShiftedA                     long    0-0                                         'Shift 10
+                                shl         _rxLong, #8                             'Buffering 1 (_rxLong undefined on reset)
+
+:bit7                           waitcnt     _rxWait1, bitPeriod0
                                 test        rxMask, ina                     wc
-                                muxc        rxByte, #%1000_0000
-                                or          _rxLong, rxByte                         'Buffering 2
-rxShiftedB                      long    0-0                                         'Shift 11
-rxShiftedC                      long    0-0                                         'Shift 12
-rxStopBit                       waitcnt     _rxWait1, bitPeriod0                    'see page 98
+                                muxc        _rxByte, #%1000_0000
+                                or          _rxLong, _rxByte                        'Buffering 2
+_RxShiftedB                     long    0-0                                         'Shift 11
+_RxShiftedC                     long    0-0                                         'Shift 12
+
+:stopBit                        waitcnt     _rxWait1, bitPeriod0                    'see page 98
                                 testn       rxMask, ina                     wz      'z=0 framing error
-rxStartWait                     long    0-0                                         'wait for start bit, or exit loop
+
+_RxStartWait                    long    0-0                                         'wait for start bit, or exit loop
                         if_z    add         _rxWait0, cnt                           'Wait 1
-rxStartBit              if_z    waitcnt     _rxWait0, bitPeriod0
+
+:startBit               if_z    waitcnt     _rxWait0, bitPeriod0
                         if_z    test        rxMask, ina                     wz      'z=0 framing error
-                        if_z    mov         phsb, _rxWait0                          'Timeout 1 - phsb used as scratch since ctrb should be off
-                        if_z    sub         phsb, _rxWait1                          'Timeout 2 - see page 98 for timeout notes
-                        if_z    cmp         phsb, timeout                    wc     'Timeout 3 - c=0 reset, c=1 no reset
-                        if_z    jmp         #rxBit0
+                        if_z    mov         _rxTmp_SH, _rxWait0                     'Timeout 1
+                        if_z    sub         _rxTmp_SH, _rxWait1                     'Timeout 2 - see page 98 for timeout notes
+                        if_z    cmp         _rxTmp_SH, timeout              wc      'Timeout 3 - c=0 reset, c=1 no reset
+                        if_z    jmp         #_RxLoopTop
 
-                    { fall through to recovery mode for framing errors }
+                        { fall through to RecoveryMode for framing errors }
 
-{ Recovery Mode }
+{ RecoveryMode (jmp), with Break Detection 
+    In recovery mode the implementation waits for the rx line to be idle for at least recoveryTime clocks, then
+  it will jump to ReceiveCommand to wait for a command.
+    If the rx line is continuously low for at least breakMultiple*recoveryTime clocks then a break
+  condition is detected.
+    RecoveryMode uses the counter B module to count the number of clocks that the rx line is low. It turns the
+  counter module off before exiting since it consumes some extra power, but this is not required.
+}
 RecoveryMode
-                                mov         ctrb, rcvyLowCounterMode
-                                mov         cnt, recoveryTime
-                                add         cnt, cnt
-                                mov         _rcvyPrevPhsb, phsb
-rcvyLoop                        waitcnt     cnt, recoveryTime
+                                mov         ctrb, rcvyLowCounterMode                'start counter B module counting clocks the rx line is low
+                                mov         _rcvyWait, recoveryTime
+                                add         _rcvyWait, cnt
+                                mov         _rcvyPrevPhsb, phsb                     'first wait is always recoveryTime+1 counts, so _rcvyCountdown reset guaranteed
+
+:loop                           waitcnt     _rcvyWait, recoveryTime
                                 mov         _rcvyCurrPhsb, phsb
-                                cmp         _rcvyPrevPhsb, _rcvyCurrPhsb    wz      'z=1 line always high, so exit
-                        if_z    mov         ctrb, #0                                'ctrb must be off before exit
+                                cmp         _rcvyPrevPhsb, _rcvyCurrPhsb    wz      'z=1 line is idle (was never low), so exit
+                        if_z    mov         ctrb, #0                                'turn off counter B module
                         if_z    jmp         #ReceiveCommand
+                                mov         _rcvyTmp, _rcvyPrevPhsb                 '_rcvyTmp will be value of _rcvyCurrPhsb if line always low over interval
+                                add         _rcvyTmp, recoveryTime
+                                cmp         _rcvyTmp, _rcvyCurrPhsb         wz      'z=0 line high at some point during interval, or this is first pass through loop
+                        if_nz   mov         _rcvyCountdown, breakMultiple           'reset break detection countdown if line not continuously low
                                 mov         _rcvyPrevPhsb, _rcvyCurrPhsb
-                                jmp         #rcvyLoop
+                                djnz        _rcvyCountdown, #:loop                  'break is detected when _rcvyCountdown reaches zero
+                                mov         ctrb, #0                                'turn off counter B module
+
+                                jmp         BreakHandlerAddr
 
 
-{ Receive Command 2 - Finishing Up After Packet Arrival }
-ReceiveCommand2
-                                { prepare to store any leftover payload }
-                                test        payloadLength, #%11             wz      'z=0 leftovers exist
-                        if_nz   movd        rxStoreLeftovers, _rxNextAddr
-                                { evaluate F16 for last byte; these are also spacer instructions that don't change z;
-                                    no need to compute upper F16, it should already be 0 if there are no errors }
-                                add         _rxF16L, rxByte
+{ DefaultBreakHandler 
+    This code is executed after the break is detected (it may still be ongoing).
+}
+DefaultBreakHandler
+                                waitpeq     rxMask, rxMask                          'wait for break to end
+                                jmp         #RecoveryMode
+
+
+{ RX Parsing Instructions, used by ReceiveCommand
+    There are three parsing instructions per byte received. Shifted parsing code executes inside the
+  receive loop at _RxShiftedA-C. See pages 102, 97, 94.
+}
+rxFirstParsingGroup
+rxH0                
+                                xor         _rxCH0inc_SH, #1                    'A - _rxCH0inc was saved in-loop (up through bit 6); bit 0 should be 1 (invert to test)
+                                test        _rxCH0inc_SH, #%0100_0111   wz      ' B - z=1 good reserved bits 0-2 and 6
+                    if_nz_or_c  jmp         #RecoveryMode                       ' C - ...abort if bad reserved bits (c = bit 7 must be 0)
+rxH1                            
+                                shr         _rxLong, #3                         'A - prepare _rxLong to hold payloadSize (_rxLong buffering occurs between A and B)
+                                mov         payloadSize, _rxLong                ' B - payloadSize still needs to be masked (upper bits undefined)
+                                and         payloadSize, k7FF                   ' C - payloadSize is ready
+rxH2 
+                                test        _rxByte, #%0110_0000        wz      'A - test reserved bits 5 and 6 of CH2 (they must be zero)
+                        if_nz   jmp         #RecoveryMode                       ' B - ...abort for bad reserved bits
+                                mov         packetInfo, _rxByte                 ' C - save CH2 as packetInfo for later use
+rxH3
+                                mov         _rxRemaining, payloadSize           'A - _rxRemaining = number of bytes of payload yet to receive
+                                mov         _rxNextAddr, #Payload               ' B - must reset _rxNextAddr before rxP* code
+                                mov         _rxPort_SH, _rxByte                 ' C - save the port number
+rxH4
+kFFFF                           long    $ffff                                   'A - (spacer nop) lower word mask
+k7FF                            long    $7ff                                    ' B - (spacer nop) 2047 = maximum payload length allowed by Crow specification
+                                mov         token, _rxByte                      ' C - save the token
+rxF16_C0 
+                                mov         _rxLeftovers, _rxLong               'A - preserve any leftover bytes in case this is the end
+                                mov         _rxCountdown, _rxRemaining          ' B - _rxCountdown = number of payload bytes in next chunk
+                                max         _rxCountdown, #128                  ' C - chunks have up to 128 payload bytes
+rxF16_C1
+                                add         _rxCountdown, #1            wz      'A - undo automatic decrement; z=1 the next chunk is empty -- i.e. done
+                                sub         _rxRemaining, _rxCountdown          ' B - decrement the payload bytes remaining counter by the number in next chunk
+                        if_z    mov         _RxStartWait, rxExit                ' C - z=1 no payload left, so exit
+rxP0_Eval
+                        if_z    subs        _rxOffset, #9                       'A - go to rxF16_C0 if done with chunk's payload
+                                or          _rxF16U_SH, _rxF16L         wz      ' B - z=0 bad F16 (both F16L and F16U should be zero at this point)
+                        if_nz   jmp         #RecoveryMode                       ' C - ...abort for bad F16
+rxP1                    
+                        if_z    subs        _rxOffset, #12                      'A - go to rxF16_C0 if done with chunk's payload
+                                cmp         payloadSize, maxPayloadSize wc, wz  ' B - test for potential buffer overrun
+                if_nc_and_nz    mov         _rxNextAddr, #Payload               ' C - payload too big for buffer so keep rewriting first long (will report Crow error later)
+rxP2                    
+                        if_z    subs        _rxOffset, #15                      'A - go to rxF16_C0 if done with chunk's payload
+maxPayloadSize                  long    cMaxPayloadSize & $7ff                  ' B - (spacer nop) payloads must be 2047 or less by Crow specification
+                                movd        _RxStoreLong, _rxNextAddr           ' C - prep to write next long to buffer
+rxP3                    
+                        if_z    subs        _rxOffset, #18                      'A - go to rxF16_C0 if done with chunk's payload
+_RxStoreLong                    mov         0-0, _rxLong                        ' B
+                                add         _rxNextAddr, #1                     ' C - incrementing _rxNextAddr and storing the long must occur in same block
+rxP0                    
+                        if_z    subs        _rxOffset, #21                      'A - go to rxF16_C0 if done with chunk's payload
+                        if_nz   subs        _rxOffset, #12                      ' B - otherwise go to rxP1
+rcvyLowCounterMode              long    $3000_0000 | ($1f & cRxPin)             ' C - (spacer nop) rx pin number should be set before launch
+
+
+{ RX StartWait Instructions, used by ReceiveCommand
+    These instructions are shifted to _RxStartWait in the receive loop to either receive more bytes or
+  to exit the loop. The 'if_z' causes the instruction to be skipped if a framing error is detected on the stop bit.
+}
+rxContinue              if_z    waitpne     rxMask, rxMask                      'executed at _RxStartWait
+rxExit                  if_z    jmp         #ReceiveCommandFinish               'executed at _RxStartWait
+
+
+{ ReceiveCommandFinish 
+    This is where the receive loop exits to when all bytes of the packet have arrived.
+}
+ReceiveCommandFinish
+                                { Prepare to store any leftover (unstored) payload. This is OK even if the payload exceeds capacity. In
+                                    that case _rxNextAddr will be Payload or Payload+1, and we assume there is at least two long's
+                                    worth of payload capacity, so no overrun occurs. }
+                                test        payloadSize, #%11               wz      'z=0 leftovers exist
+                        if_nz   movd        _RxStoreLeftovers, _rxNextAddr
+
+                                { Evaluate F16 for last byte. These are also spacer instructions that don't change z.
+                                    There is no need to compute upper F16 -- it should already be 0 if there are no errors. }
+                                add         _rxF16L, _rxByte
                                 cmpsub      _rxF16L, #255
-                                { store the leftover payload, if any }
-rxStoreLeftovers        if_nz   mov         0-0, _rxLeftovers
-                                { verify the last F16 }
-                                or          inb, _rxF16L                    wz      'z=0 bad F16; inb is upper rxF16
+
+                                { Store the leftover payload, if any. Again, this is safe even if the command's payload
+                                    exceeds capacity (see above). }
+_RxStoreLeftovers       if_nz   mov         0-0, _rxLeftovers
+
+                                { Verify the last F16. }
+                                or          _rxF16U_SH, _rxF16L             wz      'z=0 bad F16
                         if_nz   jmp         #RecoveryMode                           '...bad F16 (invalid packet)
-                                { verify reserved bit 5 of CH3 }
-                                test        packetInfo, #%0010_0000         wc      'c=1 bad bit 5 (must be 0); packetInfo=CH3 from rxH3
-                        if_c    jmp         #RecoveryMode                           '...bad reserved bit 5 of CH3 (invalid packet)
-                                { finish parsing address and verify it }
-                                and         cnt, #conAddressMask            wz      'z=1 broadcast address; cnt is now packet's address (originally from rxH3)
-                                test        packetInfo, #conMuteFlag        wc      'c=1 mute response
-                    if_z_and_nc jmp         #RecoveryMode                           '...broadcast must mute (invalid packet)
-                                { verify address if not broadcast }
-rxVerifyAddress         if_nz   cmp         cnt, #0-0                       wz      'cnt is packet's address (from above); device address (s-field) set at initialization
-                        if_nz   jmp         #ReceiveCommand                         '...wrong non-broadcast address
-                                { test command type and protocol }
-                                test        ina, #%0001_0000                wc      'c=1 user command; ina=CH0 from rxH0
-                                cmp         par, userProtocol               wz      'z=0 protocol doesn't match user protocol; par is packet's protocol (from rxH2 or rxH5)
-                    if_c_and_nz jmp         #ReceiveCommand                         '...wrong protocol for user command
-                        if_c    jmp         #UserCode                               '...valid user command with correct protocol, so invoke user code
 
-                            { fall through to admin code }
+                                { Extract the address. }
+                                mov         _rxTmp_SH, packetInfo
+                                and         _rxTmp_SH, #cAddressMask        wz      'z=1 broadcast address; _rxTmp is now packet's address
+                                test        packetInfo, #cRspExpectedFlag   wc      'c=1 response is expected/required
+                    if_z_and_c  jmp         #RecoveryMode                           '...broadcast commands must not expect a response (invalid packet)
 
-{ Admin Code }
-{ Admin code handles responses to admin commands, such as ping and getDeviceInfo. Admin code must 
-    always save and restore sendBufferPointer so that user code can assume it doesn't change.
-  At this point the admin protocol number has not been checked to see if it's supported. }
-AdminCode                       cmp         par, #0                         wz      'z=1 universal admin protocol (=0); par is packet's protocol (from rxH2 or rxH5)
-                        if_nz   jmp         #ReceiveCommand                         '...not admin protocol 0 (so unsupported admin protocol)
-                                test        packetInfo, #conMuteFlag        wc      'c=1 muted response (and possible broadcast command)
-                        if_c    jmp         #RecoveryMode                           '...admin protocol 0 commands must not be muted or broadcast (invalid command)
-                                { admin protocol 0 with no payload is ping }
-                                cmp         payloadLength, #0               wz      'z=1 ping command
-                        if_nz   jmp         #adminCheckForGetDeviceInfo             '...command not ping
-                                { perform ping - params all ready (no payload, so sendBufferPointer not used }
-                                jmp         #SendFinalResponse
-                                { other admin protocol 0 command, getDeviceInfo, has 0x00 as payload }
-adminCheckForGetDeviceInfo      cmp         payloadLength, #1               wz      'z=0 wrong payload length for getDeviceInfo
-                        if_z    test        Payload, #$ff                   wz      'z=0 wrong payload for getDeviceInfo
-                        if_nz   jmp         #RecoveryMode                           '...command not getDeviceInfo or ping, so invalid for admin protocol 0
-                                { perform getDeviceInfo }
-                                mov         _adminTmp, sendBufferPointer            'save sendBufferPointer
-                                mov         sendBufferPointer, #adminGetDeviceInfoBuffer
-                                mov         payloadLength, #12
-                                call        #SendFinalAndReturn
-                                mov         sendBufferPointer, _adminTmp            'restore sendBufferPointer
+                                { Check the address if not broadcast. }
+_RxCheckAddress         if_nz   cmp         _rxTmp_SH, #cAddress            wz      'z=0 addresses don't match; address (s-field) may be set before launch
+                        if_nz   jmp         #ReceiveCommand                         '...valid packet, but not addressed to this device
+
+                                { At this point we have determined that the command was properly formatted and
+                                    intended for this device (whether specifically addressed or broadcast). }
+
+                                { Verify that the payload size was under the limit. If it exceeded capacity then the
+                                    payload bytes weren't actually saved, so there's nothing to do except report
+                                    that the command was too big. }
+                                cmp         payloadSize, maxPayloadSize     wc, wz
+                if_nc_and_nz    mov         Payload, #cCommandTooLarge
+                if_nc_and_nz    jmp         #SendCrowError
+
+                                { Check the port. }
+_RxCheckUserPort                cmp         _rxPort_SH, #cUserPort          wz      'z=1 command is for user code; s-field set before launch
+                        if_z    jmp         #UserCode
+                                cmp         _rxPort_SH, #0                  wz      'z=1 command is for Crow admin (using fall-through to save a jmp)
+
+                                { Report that the port is not open (if not Crow admin). }
+                        if_nz   mov         Payload, #cPortNotOpen
+                        if_nz   jmp         #SendCrowError 
+
+                        { fall through to CrowAdmin for port 0 }
+
+{ CrowAdmin
+    CrowAdmin starts the process of responding to standard admin commands (port 0). The admin
+  code assumes that sendBufferPointer points to Payload.
+    Supported admin commands: ping, echo/hostPresence, getDeviceInfo, getOpenPorts, and getPortInfo.
+}
+CrowAdmin
+                                { Crow admin command with no payload is ping. }
+                                cmp         payloadSize, #0                 wz      'z=1 ping command
+                        if_z    jmp         #SendResponse                           'the ping response also has no payload
+
+                                { All other Crow admin commands must have at least three bytes, starting
+                                    with 0x43 and 0x41. }
+                                cmp         payloadSize, #3                 wc      'c=1 too few bytes
+                        if_nc   mov         _admTmp, Payload
+                        if_nc   and         _admTmp, kFFFF
+                        if_nc   cmp         _admTmp, k4143                  wz      'z=0 bad identifying bytes
+                    if_c_or_nz  jmp         #ReportUnknownProtocol
+
+                                { The third byte provides the specific command. }
+                                mov         _admTmp, Payload
+                                shr         _admTmp, #16
+                                and         _admTmp, #$ff                   wz      'z=1 type==0 -> echo/hostPresence
+                        if_z    jmp         #SendResponse                           'payload is identical for echo (command 0x00 becomes status OK)
+                                cmp         _admTmp, #1                     wz      'z=1 type==1 -> getDeviceInfo
+                        if_z    jmp         #AdminGetDeviceInfo
+                                cmp         _admTmp, #2                     wz      'z=1 type==2 -> getOpenPorts
+                        if_z    jmp         #AdminGetOpenPorts
+                                cmp         _admTmp, #3                     wz      'z=1 type==3 -> getPortInfo
+                        if_z    jmp         #AdminGetPortInfo
+
+                                { PropCR does not support any other admin commands. }
+                                mov         Payload, #cAdminCommandNotAvailable
+
+                            { fall through to AdminSendError }
+
+{ AdminSendError (jmp)
+    This routine sends an admin protocol level error response. It should be used only if we are confident
+  that the command was an admin command.
+    Payload should be set with the error status code before jumping to this code.
+}
+AdminSendError
+                                shl         Payload, #16
+                                or          Payload, k4143
+                                mov         payloadSize, #3
+                                jmp         #SendResponse
+
+
+{ AdminGetDeviceInfo (jmp)
+    This routine provides basic info about the Crow device. The response has already been prepared -- all we need to
+  do is direct sendBufferPointer to its location, and then remember to set the pointer back to Payload afterwards.
+}
+AdminGetDeviceInfo
+                                mov         sendBufferPointer, #getDeviceInfoBuffer
+                                mov         payloadSize, #43
+                                call        #SendResponseAndReturn
+                                mov         sendBufferPointer, #Payload
                                 jmp         #ReceiveCommand
 
-{ This is the prepared getDeviceInfo response payload. }
-adminGetDeviceInfoBuffer
-    long    $51800100                                                                               'Crow v1, implementationID = $8051 (PropCR-Fast-BD)
-    long    $01010000 | ((conMaxPayloadLength & $ff) << 8) | ((conMaxPayloadLength & $700) >> 8)    'conMaxPayloadLength, supports 1 admin protocol and 1 user protocol
-    long    ((conUserProtocol & $ff) << 24) | ((conUserProtocol & $ff00) << 8)                      'admin protocol 0, conUserProtocol
+
+{ AdminGetOpenPorts (jmp)
+    The getOpenPorts response consists of six bytes: 0x43, 0x41, 0x00, 0x00, plus the user port and admin port 0.
+}
+AdminGetOpenPorts
+                                mov         Payload, k4143
+_AdminOpenPortsList             mov         Payload+1, #cUserPort                   's-field set before launch (admin port 0 gets set automatically)
+                                mov         payloadSize, #6
+                                jmp         #SendResponse
+
+{ AdminGetPortInfo (jmp)
+    The getPortInfo response returns information about a specific port.
+}
+AdminGetPortInfo                { The port number of interest is in the fourth byte of the command. }
+                                cmp         payloadSize, #4                 wc      'c=1 command too short
+                        if_c    mov         Payload, #cAdminMissingParameters
+                        if_c    jmp         #AdminSendError
+                                mov         _admTmp, Payload
+                                shr         _admTmp, #24                    wz      '_admTmp is the requested port number; z=1 admin port 0
+                
+                                { If z=1 then the requested port number is 0 (Crow admin). }
+                        if_z    mov         sendBufferPointer, #getPortInfoBuffer_Admin
+                        if_z    mov         payloadSize, #16
+                        if_z    jmp         #_AdminGetPortInfoFinish
+
+                                { Check if it is the user port. }
+_AdminCheckUserPort             cmp         _admTmp, #cUserPort             wz      'z=1 user port; s-field set before launch
+                        if_z    mov         sendBufferPointer, #getPortInfoBuffer_User
+                        if_z    mov         payloadSize, #15
+            
+                                { If it is not the admin port or the user port, then the port is closed. }
+                        if_nz   mov         sendBufferPointer, #getPortInfoBuffer_Closed
+                        if_nz   mov         payloadSize, #4
+
+_AdminGetPortInfoFinish         call        #SendResponseAndReturn
+                                mov         sendBufferPointer, #Payload
+                                jmp         #ReceiveCommand
 
 
-{ Receive Command 3 - Shifted Code }
-{ There are three parsing instructions per byte received. Shifted parsing code executes inside the
-    receive loop at rxShiftedA-C. See pages 102, 97, 94. }
-rxH0                    if_c    test        rxByte, #%0010_1000         wz      'A - z=1 good reserved bits 3, 5, and 6 (z=0 before due to countdown reset)
-                    if_nz_or_c  jmp         #RecoveryMode                       ' B - ...abort if bad reserved bits (bit 7 must be 0); might be another device's response
-                                mov         ina, rxByte                         ' C - ina used to save the T field (command type)
-rxH1                            and         _rxLong, #$7                        'A - mask off upper three bits for payloadLength (shift occurs between A and B)
-                                mov         payloadLength, _rxLong              ' B
-                                mov         _rxRemaining, payloadLength         ' C - _rxRemaining = number of bytes of payload yet to receive
-rxH2                            mov         par, #0                             'A - par used to hold packet's protocol; must set implicit 0 value
-                                mov         _rxNextAddr, #Payload               ' B - must reset _rxNextAddr before rxP* code
-                                mov         token, rxByte                       ' C
-rxH3                            mov         cnt, rxByte                         'A - cnt used to hold packet's address; used in ReceiveCommand2
-                                mov         packetInfo, rxByte                  ' B
-                        if_nc   mov         _rxOffset, #9                       ' C
-rxH4
-rcvyLowCounterMode              long    $3000_0000                              'A - required nop - rx pin number set in initialization
-kFFFF                           long    $ffff                                   ' B - required nop
-k7FF                            long    $7FF                                    ' C - required nop; 2047 = maximum payload length allowed by Crow specification
-rxH5
-maxPayloadLength                long    conMaxPayloadLength & $7ff              'A - required nop - must be 2047 or less by Crow specification
-                                mov         par, _rxLong                        ' B - reminder: par is packet's protocol
-                                and         par, kFFFF                          ' C
-rxF16C0                         mov         _rxLeftovers, _rxLong               'A - store any leftover bytes in case this is the end
-                                mov         _rxCountdown, _rxRemaining          ' B
-                                max         _rxCountdown, #128                  ' C - _rxCountdown = number of payload bytes in next chunk
-rxF16C1                         add         _rxCountdown, #1            wz      'A - undo automatic decrement
-                                sub         _rxRemaining, _rxCountdown          ' B
-                        if_z    mov         rxStartWait, rxExit                 ' C - no payload left, so exit
-rxP0Eval                if_z    subs        _rxOffset, #9                       'A - go to rxF16C0 if done with chunk's payload
-                                or          inb, _rxF16L                wz      ' B - z=0 bad F16 - inb is upper rxF16
-                        if_nz   jmp         #RecoveryMode                       ' C - ...bad F16
-rxP1                    if_z    subs        _rxOffset, #12                              'A - go to rxF16C0 if done with chunk's payload
-                                cmp         payloadLength, maxPayloadLength     wc, wz  ' B
-                if_nc_and_nz    jmp         #RecoveryMode                               ' C - ...payload too big for buffer
-rxP2                    if_z    subs        _rxOffset, #15                      'A - go to rxF16C0 if done with chunk's payload
-txByte
-rxByte                          long    0                                       ' B - required nop - upper bytes must always be 0 for F16
-                                movd        rxStoreLong, _rxNextAddr            ' C
-rxP3                    if_z    subs        _rxOffset, #18                      'A - go to rxF16C0 if done with chunk's payload
-                                add         _rxNextAddr, #1                     ' B - incrementing _rxNextAddr and storing the long must occur in same block
-rxStoreLong                     mov         0-0, _rxLong                        ' C
-rxP0                    if_z    subs        _rxOffset, #21                      'A - go to rxF16C0 if done with chunk's payload
-                        if_nz   subs        _rxOffset, #12                      ' B - otherwise go to rxP1
-userProtocol                    long    conUserProtocol & $ffff                 ' C - required nop
+{ The following buffers are prepared values for admin responses. If any of these buffers are changed
+    remember to update the payload sizes in the above code. }
 
-rxContinue              if_z    waitpne     rxMask, rxMask                  'executed at rxStartWait
-rxExit                  if_z    jmp         #ReceiveCommand2                'executed at rxStartWait
+getDeviceInfoBuffer
+long $0200_4143         'packet identifier (0x43, 0x41), status=0 (OK), implementation's Crow version = 2
+long ((cMaxPayloadSize & $ff) << 24) | ((cMaxPayloadSize & $0700) << 8) | ((cMaxPayloadSize & $0700) >> 8) | ((cMaxPayloadSize & $ff) << 8) 'buffer sizes, MSB first
+long $0e0f_0005         'packet includes implementation ascii description and device ascii description; implAsciiDesc has 14 bytes length at offset 15
+long $500e_1d00         'device ascii description has length of 14 bytes at offset 29; first char of implAsciiDesc is 'P' (final string is "PropCR-BD v0.2")
+long $4370_6f72         '"ropC"
+long $4442_2d52         '"R-BD"
+long $2e30_7620         '" v0."
+long $5838_5032         '"2"; deviceAsciiDesc starts with "P8X" (final string is "P8X32A (cog N)")
+long $2041_3233         '"32A "
+long $676f_6328         '"(cog"
+getDeviceInfoCogNum
+long $0029_3020         '" N)" - initializing code adds cogID to second byte to get numeral
+
+getPortInfoBuffer_Admin
+long $0300_4143         'packet identifier (0x43, 0x41), status=0 (OK), port is open, protocolIdentStr included
+long $4309_0700         'protocolIdentStr starts at offset 7 and has length 9; first char is "C"; final string = "CrowAdmin"
+long $4177_6f72         '"rowA"
+long $6e69_6d64         '"dmin"
+
+getPortInfoBuffer_User
+long $0300_4143         'packet identifier (0x43, 0x41), status=0 (OK), port is open, protocolIdentStr included
+long $5008_0700         'protocolIdentStr starts at offest 7 and has length 8; first char is "P"; final string = "PeekPoke"
+long $506b_6565         '"eekP"
+long $0065_6b6f         '"oke"
+
+getPortInfoBuffer_Closed                            'k4143 works as prepared response for getPortInfo for a closed port (size 4 bytes)
+k4143                           long    $4143       'identifying bytes for Crow admin packets; potential nop
 
 
-{ txSendAndResetF16 }
-{ Helper routine to send the current F16 checksum (upper sum, then lower sum). It also resets
-    the checksum after sending. }
-txSendAndResetF16
+{ TxSendAndResetF16 (call)
+    Helper routine to send the current F16 checksums (upper sum, then lower sum). It also resets
+  the checksums after sending.
+}
+TxSendAndResetF16
                                 mov         _txLong, _txF16L
                                 shl         _txLong, #8
                                 or          _txLong, _txF16U
                                 mov         _txCount, #2
-                                movs        txHandoff, #_txLong
-                                call        #txSendBytes
+                                movs        _TxHandoff, #_txLong
+                                call        #TxSendBytes
                                 mov         _txF16L, #0
                                 mov         _txF16U, #0
-txSendAndResetF16_ret           ret
+TxSendAndResetF16_ret           ret
 
 
-{ txSendBytes }
-{ Helper routine used to send bytes. It also updates the running F16 checksum. It assumes
-    the tx pin is already an output.
-  Usage:    mov         _txCount, <number to send != 0>
-            movs        txHandoff, #<buffer register>   (no # if using pointer)
-            call        #txSendBytes                                                }
-txSendBytes
-                                mov         par, #0                                 'par used to perform handoff every 4 bytes
-                                mov         cnt, cnt                                'cnt used for timing
-                                add         cnt, #21
-txByteLoop                      test        par, #%11                   wz
-txHandoff               if_z    mov         _txLong, 0-0
-                        if_z    add         txHandoff, #1
-txStartBit                      waitcnt     cnt, bitPeriod0
+{ TxSendBytes (call)
+    Helper routine used to send bytes. It also updates the running F16 checksums. It assumes
+  the tx pin is already an output.
+    Usage:  mov         _txCount, <number of bytes to send, MUST be non-zero>
+            movs        _TxHandoff, <buffer address, sending starts with low byte>
+            call        #TxSendBytes
+    After: _txCount = 0                                         
+}
+TxSendBytes
+                                mov         _txByteNum_SH, #0
+                                mov         _txWait_SH, cnt
+                                add         _txWait_SH, #21
+_TxByteLoop                     test        _txByteNum_SH, #%11         wz          'z=1 byteNum%4 == 0, so load next long
+_TxHandoff              if_z    mov         _txLong, 0-0
+                        if_z    add         _TxHandoff, #1
+:startBit                       waitcnt     _txWait_SH, bitPeriod0
                                 andn        outa, txMask
-                                mov         txByte, _txLong
-                                and         txByte, #$ff                            'txByte MUST be masked for F16 (also is a nop)
-                                add         _txF16L, txByte
+                                mov         _txByte, _txLong
+                                and         _txByte, #$ff                           '_txByte MUST be masked for F16 (also required since it aliases _rxByte)
+                                add         _txF16L, _txByte
                                 ror         _txLong, #1                 wc
-txBit0                          waitcnt     cnt, bitPeriod1
+:bit0                           waitcnt     _txWait_SH, bitPeriod1
                                 muxc        outa, txMask
                                 cmpsub      _txF16L, #255
                                 add         _txF16U, _txF16L
                                 cmpsub      _txF16U, #255
                                 ror         _txLong, #1                 wc
-txBit1                          waitcnt     cnt, bitPeriod0
+:bit1                           waitcnt     _txWait_SH, bitPeriod0
                                 muxc        outa, txMask
-                                add         par, #1
-                                mov         inb, #6                                 'inb is bit loop count
-txBitLoop                       ror         _txLong, #1                 wc
-txBitX                          waitcnt     cnt, bitPeriod1
+                                add         _txByteNum_SH, #1
+                                mov         _txBitCountdown_SH, #6
+:bitLoop                        ror         _txLong, #1                 wc
+:bits2to7                       waitcnt     _txWait_SH, bitPeriod1
                                 muxc        outa, txMask
-                                xor         txBitX, #1                              'this is why bitPeriod0 must be at even address, with bitPeriod1 next
-                                djnz        inb, #txBitLoop
-txStopBit                       waitcnt     cnt, stopBitDuration
+                                xor         :bits2to7, #1                           'this is why bitPeriod0 must be at even address, with bitPeriod1 next
+                                djnz        _txBitCountdown_SH, #:bitLoop
+:stopBit                        waitcnt     _txWait_SH, stopBitDuration
                                 or          outa, txMask
-                                djnz        _txCount, #txByteLoop
-                                waitcnt     cnt, #0
-txSendBytes_ret                 ret
+                                djnz        _txCount, #_TxByteLoop
+                                waitcnt     _txWait_SH, #0                          'do not return until stop bit duration expires
+TxSendBytes_ret                 ret
 
 
-{ Sending Routines: SendFinalResponse (jmp)
-                    SendFinalAndReturn (call) }
-SendFinalResponse
-                                movs        Send_ret, #ReceiveCommand
-SendFinalAndReturn
-                                { check if muted, and ensure payload length is within specification limits }
-txPerformChecks                 test        packetInfo, #conMuteFlag            wc      'c=1 muted
-                        if_c    jmp         Send_ret                                    '...must not send anything if responses muted
-                                max         payloadLength, k7FF                         'must not exceed specification max
-                                { compose header bytes RH0-RH2 }
-                                mov         _txLong, token
-                                shl         _txLong, #8
-                                mov         _txCount, payloadLength                     '_txCount being used as a scratch register for next 8 instructions
+{ ReportUnknownProtocol (jmp)
+    Both admin and user code may use this routine to send a UnknownProtocol Crow-level
+  error response. This is the correct action to take if the received command does not
+  conform to the expected protocol format.
+    After sending the error response execution goes to ReceiveCommand.
+}
+ReportUnknownProtocol
+                                mov         Payload, #cUnknownProtocol
+
+                            { fall through to SendCrowError }
+
+{ SendCrowError (jmp)
+    This routine sends a Crow-level error response.
+    It assumes the low byte of Payload has been set to the error number (and that no
+  other bits of E0 are set -- PropCR does not send error details).
+}
+SendCrowError                   movs        _SendApplyTemplate, #$82                'this modification of the RH0 template is automatically reverted at end of sending
+                                mov         payloadSize, #1
+
+                            { fall through to SendResponse }
+
+{ SendResponse (jmp), SendResponseAndReturn (call)
+    Usage:  mov     payloadSize, <size of payload, in bytes, may be zero>
+           (mov     sendBufferPointer, #<register of start of buffer>) 'sendBufferPointer = Payload = 0 by default; warning: admin code assumes sendBufferPointer = Payload
+            jmp     #SendResponse
+            -or-
+            call    #SendResponseAndReturn
+    After: payloadSize will be undefined. All tmp*v temporaries will also be undefined (i.e. those that alias _tx* temporaries).
+}
+SendResponse                    movs        Send_ret, #ReceiveCommand
+SendResponseAndReturn
+                                { Verify that there's an open transaction (i.e. that we are allowed to send a response). }
+                                test        packetInfo, #cRspExpectedFlag       wc      'c=0 response forbidden
+                        if_nc   jmp         #_SendDone                                  '...must not send if responses forbidden
+
+                                { Make sure the payload size is within specification -- truncate if necessary. This is done to prevent
+                                    sending too many payload bytes -- the payload size in the header will always be 11 bits. }
+                                max         payloadSize, k7FF
+
+                                { Compose header bytes RH0-RH2 in token (so RH2 already set). }
+                                shl         token, #8                                   'RH2 = token
+                                mov         _txCount, payloadSize                       '_txCount being used for scratch
                                 and         _txCount, #$ff
-                                or          _txLong, _txCount
-                                shl         _txLong, #8
-                                mov         _txCount, payloadLength
-                                shr         _txCount, #8
-                                or          _txCount, #$90                              'apply header template 
-                                or          _txLong, _txCount
-                                { reset F16 }
+                                or          token, _txCount                             'RH1 = lower eight bits of payloadSize
+                                shl         token, #8
+                                mov         _txCount, payloadSize
+                                shr         _txCount, #5
+                                and         _txCount, #%0011_1000
+_SendApplyTemplate              or          _txCount, #2                                'RH0 template (s-field) is changed only for error responses, then reverted when done
+                                or          token, _txCount                             'RH0 = upper three bits of payloadSize, errorFlag, and reserved bits
+
+                                { Reset F16. }
                                 mov         _txF16L, #0
                                 mov         _txF16U, #0
-                                { send header }
+
+                                { Retain line (make output). }
+                                or          dira, txMask
+
+                                { Send the header (in token). }
                                 mov         _txCount, #3
-                                movs        txHandoff, #_txLong
-txRetainLine                    or          dira, txMask
-                                call        #txSendBytes
-                                call        #txSendAndResetF16
-                                { send body, in chunks (payload data + F16 sums) }
-                                movs        txSetHandoff, sendBufferPointer
-                                mov         _txRemaining, payloadLength
-txPayloadLoop                   mov         _txCount, _txRemaining              wz
-                        if_z    jmp         #txLoopExit
+                                movs        _TxHandoff, #token
+                                call        #TxSendBytes
+                                call        #TxSendAndResetF16
+
+                                { Send body, in chunks (payload data + F16 sums). }
+                                movs        :setHandoff, sendBufferPointer
+                                mov         _txRemaining, payloadSize
+:loop                           mov         _txCount, _txRemaining              wz
+                        if_z    jmp         #:loopExit
                                 max         _txCount, #128                              'chunks are 128 bytes of payload data
                                 sub         _txRemaining, _txCount
-txSetHandoff                    movs        txHandoff, #0-0
-                                call        #txSendBytes
-                                call        #txSendAndResetF16
-                                add         txSetHandoff, #32                           'next chunk (if any) is at +32 registers
-                                jmp         #txPayloadLoop
-txLoopExit
-txReleaseLine                   andn        dira, txMask
-Send_ret
-SendFinalAndReturn_ret          ret
+:setHandoff                     movs        _TxHandoff, #0-0
+                                call        #TxSendBytes
+                                call        #TxSendAndResetF16
+                                add         :setHandoff, #32                            'next chunk (if any) is at +32 registers
+                                jmp         #:loop
 
-sendBufferPointer       long    Payload     'potential nop if only lower 9 bits set
+:loopExit                       { Release line (make high-z). }
+                                andn        dira, txMask
+                                
+_SendDone                       { Revert the RH0 template (in case this was an error response). }
+                                movs        _SendApplyTemplate, #2
+Send_ret
+SendResponseAndReturn_ret       ret
 
 
 { ==========  Begin User Block  ========== }
 
-
-{ User Code }
-{ This is where PropCR code will jmp to when a valid user command packet has arrived.
-  Refer to "PropCR-Fast User Guide.txt" for more information. }
+{ UserCode (jmp)
+    This is where PropCR code will jump to when a valid user command packet has arrived at the
+  user port.
+    Variables of interest:
+        - Payload (register 0), the buffer where the command payload has been stored. Received
+          data is stored in little-endian order within each long (assuming that 'propcr ordering'
+          was used by the PC). If the payload size is not a multiple of four the remaining upper
+          bytes of the last long will be undefined.
+        - payloadSize, the size of the command payload, which may be zero (this variable is also 
+          used for sending).
+        - packetInfo, which is the third byte of the command header. It contains the address
+          in the cAddressMask bits, and the responseExpected flag in the cRspExpectedFlag bit.
+        - sendBufferPointer, which points to the first register of the response payload. By 
+          default it points to Payload. It may be changed, but it must be restored to Payload
+          before receiving the next command (the admin code assumes it is Payload).
+    PropCR routines for user code:
+        - SendResponse (jmp) or SendResponseAndReturn (call) to send a response. First, prepare
+          the response payload and set payloadSize.
+        - ReceiveCommand (jmp) to listen for another command.
+        - ReportUnknownProtocol (jmp) to report that the command's format is not known and
+          so no response can safely be sent.
+        - SendCrowError (jmp) to send any other Crow-level error, such as RequestTooLarge. Set
+          the low byte of Payload to the error number before jumping. 
+    Other useful registers:
+        - tmp0-tmp4 and tmp5v-tmp9v, scratch registers available for use. The 'v' temporaries
+          are undefined after a SendResponseAndReturn call. All are undefined when
+          UserCode is invoked.
+        - the counter A registers, which user code is entirely free to use.
+        - the PAR register, which PropCR does not use (it does use the shadow register).
+    Warning: don't use other SPRs without consulting the 'Special Purpose Registers' section.
+}
 UserCode
                                 { All PeekPoke commands begin with the same four byte initial header: 
-                                    0x50, 0x70, commandCode, and 0x00. If the command does not have an initial
-                                    header with this format we will send a Crow-level UnrecognizedCommand response. }
-                                cmp         payloadLength, #4           wc      'c=1 payload too short
+                                    0x70, 0x70, commandCode, and 0x00. If the command does not have an initial
+                                    header with this format we will send a Crow-level UnknownProtocol error response. }
+                                cmp         payloadSize, #4             wc      'c=1 payload too short
                                 mov         scratch, Payload
                                 and         scratch, kFF00FFFF
-                                cmp         scratch, k00007050          wz      'z=0 bad fixed bytes
-                    if_c_or_nz  jmp         #ReceiveCommand                     'todo: UnrecognizedCommand
+                                cmp         scratch, k7070              wz      'z=0 bad fixed bytes
+                    if_c_or_nz  jmp         #ReportUnknownProtocol
 
-                                { After this point we assume the payload is a PeekPoke command. The response payload
-                                    will have the same initial four bytes as the command payload -- unless it is an
-                                    error response, in which case the fourth byte will be a non-zero error number. }
+                                mov         errorCode, #1                       'default PeekPoke error code is CommandNotAvailable
 
-                                { Extract the command code and see if that group is available (implemented and allowed). }
-                                mov         subcommand, Payload
-                                shr         subcommand, #16                     'at this point subcommand is command code
-                                mov         groupMask, #1
-                                shl         groupMask, subcommand               'bottom 5 bits of code determine group
-                                test        groupMask, availableGroups  wc      'c=1 group is implemented and allowed
-                        if_nc   jmp         #NotAvailable
+                                { Extract the command code and see if it is available. }
+                                mov         scratch, Payload
+                                shr         scratch, #16                wz      'z=1 command code is 0
+                                mov         commandBit, #1
+                                shl         commandBit, scratch
+                                test        commandBit, availableCmds   wc      'c=1 command is available
+                        if_nc   jmp         #ReportCommandNotAvailable
 
-                                shr         subcommand, #5              wz      'z=1 subcommand is zero
-
-                                test        groupMask, #%0001           wc      'c=1 getBasicInfo()
-                        if_c    jmp         #GetBasicInfo
-
-                                test        groupMask, #%0110           wc      'c=1 readHub/writeHub
+                        if_z    jmp         #GetBasicInfo
+                                test        commandBit, #%0110          wc      'c=1 readHub or writeHub
                         if_c    jmp         #HubReadWrite
+                                cmp         commandBit, #%1000          wz      'z=1 payloadExec
 
-                                test        groupMask, #%1000           wc      'c=1 cog control
-                        if_c    jmp         #CogControl
+                        if_nz   jmp         #ReportCommandNotAvailable          'this won't happen unless availableCmds has inappropriate bits set
 
-                        { We shouldn't get here -- it means a group was marked as implemented when it is not.
-                            So, fall through to NotAvailable. }
+PayloadExec                     { payloadExec must have at least eight bytes. }
+                                cmp         payloadSize, #8             wc      'c=1 payload too short
+                        if_c    jmp         #ReportMissingParameters
+                                jmp         #Payload+1                          'payloadExec starts at second long
 
-NotAvailable                    mov         errorCode, #cNotAvailable
-                                jmp         #SendErrorResponse
 
-GetBasicInfo            if_nz   jmp         #UnknownCommand                     'this group has only sub-command 0
-                                { The getBasicInfo response has the following format:
+SendResponseAndReturnProxy      call        #SendResponseAndReturn              'used by payloadExec
+                                jmp         SendResponseAndReturnAddr_ret
+
+
+GetBasicInfo                    { The getBasicInfo response has the following format:
                                     0-3     - same as command
                                     4-5     - par
-                                    6       - cogID
-                                    7       - 0x00
-                                    8-11    - availableGroups }
+                                    6       - available commands bitmask
+                                    7       - cogID }
                                 cogid       Payload+1
-                                shl         Payload+1, #16
+                                shl         Payload+1, #8
+                                or          Payload+1, availableCmds
+                                shl         Payload+1, #8
                                 or          Payload+1, par
-                                mov         Payload+2, availableGroups
-                                mov         payloadLength, #12
-                                jmp         #SendFinalResponse
+                                mov         payloadSize, #8
+                                jmp         #SendResponse                        
 
-HubReadWrite            if_nz   jmp         #UnknownCommand                     'both hub read and write have only sub-command 0
 
-                                { Both readHub and writeHub will have address and count arguments. }
-                                cmp         payloadLength, #8           wc
-                        if_c    jmp         #MissingData
+HubReadWrite                    { Both readHub and writeHub will have address and count arguments. }
+                                cmp         payloadSize, #8             wc
+                        if_c    jmp         #ReportMissingParameters
                                 mov         address, Payload+1
                                 and         address, kFFFF
                                 mov         numBytes, Payload+1
@@ -605,17 +894,14 @@ HubReadWrite            if_nz   jmp         #UnknownCommand                     
                                 shr         numLongs, #2
                         if_nz   add         numLongs, #1
 
-                                test        groupMask, #cHubWrite       wc
-                        if_c    jmp         #_HubWrite
+                                test        commandBit, #%0100          wc
+                        if_c    jmp         #_WriteHub
 
-_HubRead                        { hubRead will require 4 + count bytes in the response payload. Note: count may be zero. }
-                                mov         scratch, #4
-                                add         scratch, numBytes
-                                cmp         maxPayloadLength, scratch   wc      'c=1 response would exceed payload buffer
-                        if_c    jmp         #RequestTooLarge
-
-                                mov         payloadLength, #4
-                                add         payloadLength, numBytes
+_ReadHub                        { readHub will require 4 + count bytes in the response payload. Note: count may be zero. }
+                                mov         payloadSize, #4
+                                add         payloadSize, numBytes
+                                cmp         maxPayloadSize, payloadSize wc      'c=1 response would exceed payload buffer
+                        if_c    jmp         #ReportRequestTooLarge
 
                                 cmp         numBytes, #0                wz      'z=1 count==0
 
@@ -631,13 +917,13 @@ _HubRead                        { hubRead will require 4 + count bytes in the re
                         if_nz   add         :setLong, kOneInDField
                         if_nz   djnz        numLongs, #:outerLoop
 
-                                jmp         #SendFinalResponse
+                                jmp         #SendResponse
 
-_HubWrite                       { hubWrite should have 8 + count bytes in the payload. Note: count may be zero. }
+_WriteHub                       { writeHub should have 8 + count bytes in the payload. Note: count may be zero. }
                                 mov         scratch, #8
                                 add         scratch, numBytes
-                                cmp         payloadLength, scratch      wc
-                        if_c    jmp         #MissingData
+                                cmp         payloadSize, scratch        wc
+                        if_c    jmp         #ReportMissingParameters
 
                                 movs        :getLong, #Payload+2
 :outerLoop                      mov         ind, #4
@@ -651,149 +937,114 @@ _HubWrite                       { hubWrite should have 8 + count bytes in the pa
                         if_nz   djnz        ind, #:innerLoop
                         if_nz   djnz        numLongs, #:outerLoop 
 
-                                mov         payloadLength, #4
-                                jmp         #SendFinalResponse 
+                                mov         payloadSize, #4
+                                jmp         #SendResponse 
 
 
-CogControl              if_z    jmp         #_PasmCogInit                       'z from before jump (z=1 => sub-command==0)
-                                cmp         subcommand, #1              wz      'z=1 cogStop
-                        if_z    jmp         #_CogStop
-                                jmp         #UnknownCommand
-
-_PasmCogInit
-                                { pasmCogInit command has 4 additional bytes which provide the information required
-                                    by the coginit instruction. The return payload has five bytes:
-                                    0-3     - same as command
-                                    4       - cogID as written by coginit in lower bits, c-flag in bit 7 }
-                                cmp         payloadLength, #8           wc
-                        if_c    jmp         #MissingData
-                                coginit     Payload+1                   wc, wr
-                                jmp         #_CogControlDone                    'cog control responses have common response format
-
-_CogStop
-                                { cogStop has one additional byte -- the id of the cog to stop. The return payload has
-                                    five bytes:
-                                    0-3     - same as command
-                                    4       - cogID of cog stopped in lower bits, c-flag in bit 7 }
-                                cmp         payloadLength, #5           wc
-                        if_c    jmp         #MissingData
-                                cogstop     Payload+1                   wc, wr
-
-_CogControlDone                 muxc        Payload+1, #%1000_0000
-                                mov         payloadLength, #5
-                                jmp         #SendFinalResponse 
-
-long 0[8]
-                                
-{ RequestTooLarge (jmp) 
-
-}
-RequestTooLarge                 mov         errorCode, #cRequestTooLarge
-                                jmp         #SendErrorResponse
-
-{ MissingData (jmp)
-}
-MissingData                     mov         errorCode, #cMissingData
-                                jmp         #SendErrorResponse
-
-{ UnknownCommand (jmp)
-}
-UnknownCommand                  mov         errorCode, #cUnknownCommand
-                        
-                            { fall through to SendErrorResponse }
-
-{ SendErrorResponse (jmp)
-    Error responses are to be sent only if the payload appears to be a legitimate PeekPoke command
-  with a valid initial four byte header. Otherwise, use the Crow-level UnrecognizedCommand error response.
-    Usage:  mov     errorCode, #<errorCode>
-            jmp     #SendErrorResponse
-}
-SendErrorResponse
-                                shl         errorCode, #24
-                                or          Payload, errorCode
-                                mov         payloadLength, #4
-                                jmp         #SendFinalResponse
-
-{ Constants }
-kFF00FFFF           long    $FF00_FFFF
-k00007050           long    $0000_7050
+availableCmds       long    %0000_0111
+k7070               long    $7070
+kFF00FFFF           long    $ff00_ffff
 kOneInDField        long    |< 9
 
-availableGroups     long    cImplementedGroups & cAllowedGroups
+
+long 0[26]
+
+{ errorCode is set to 1 (CommandNotAvailable) at start. }
+ReportRequestTooLarge           add         errorCode, #1       '3
+ReportMissingParameters         add         errorCode, #1       '2
+ReportCommandNotAvailable                                       '1 (set by default)
+SendErrorResponse               shl         errorCode, #24
+                                or          Payload, errorCode
+                                mov         payloadSize, #4
+                                jmp         #SendResponse
 
 
-{ ==========  Begin Temporaries  ========== }
+{ ==========  Begin Res'd Variables and Temporaries ========== }
 
+fit 479
+org 479
 
-{ Registers 486 to 495 are reserved for temporaries. }
+initShiftLimit          'The initialization shifting code will ignore registers at and above this address.
 
-fit 486     'If this fails then either user code or the payload buffer must be reduced.
+BreakHandlerAddr                res     '479    
+SendResponseAddr                res     '480
+SendErrorResponseAddr           res     '481 - set errorCode first
+SendResponseAndReturnAddr_ret   res     '482 - so use "jmpret 482, 483" to send a response and return
+SendResponseAndReturnAddr       res     '483
+ReceiveCommandAddr              res     '484
+
+fit 485 'On error: must reduce user code, payload buffer, or admin code.
+org 485
+
+{ Variables }
+payloadSize     res     'used for both sending and receiving; potential nop; 11-bit value
+
+{ Temporaries
+    Registers 486 to 495 are reserved for temporaries. These are temporary (aka local or scratch) variables used
+  by PropCR. User code may also use these registers. The temporaries ending with a "v" will be undefined after
+  SendResponseAndReturn. All of these will be undefined immediately after a command is received.
+    Some variables and temporaries are stored in special purpose registers -- see 'Special Purpose Registers'.
+}
+fit 486
 org 486
 
-initShiftLimit      'The initialization shifting code will ignore registers at and above this address.
+{ The following five temporaries -- registers 486 to 490 -- preserve their values during a SendResponseAndReturn call. }
 
-{ Temporaries }
-{ These are the temporary variables used by PropCR. User code may also use these temporaries. 
-  See the section "Temporaries" in the User Guide for details. }
-
-{ The following five temporaries -- registers 486 to 490 -- preserve their values during a Send* call. }
-
-tmp0
 scratch
+tmp0
 _rxWait0        res
 
+x
 tmp1
-groupMask
 _rxWait1        res
 
+y
 tmp2
-subcommand
 _rxResetOffset  res
 
+ind
 tmp3
-address
 _rxOffset       res
 
 tmp4
-numBytes
-_initDeviceID
-_adminTmp               '_adminTmp must not alias a _tx* temporary
 _rxNextAddr     res
 
-{ The following five "v" temporaries -- registers 491 to 495 -- are undefined after a Send* call. }
+{ The following five "v" temporaries -- registers 491 to 495 -- are undefined after a SendResponseAndReturn call. }
 
+address
 tmp5v
-numLongs
 _rcvyPrevPhsb
-_initTmp
 _txF16L
 _rxF16L         res
 
+numBytes
 tmp6v
-x
 _rcvyCurrPhsb
-_initHub
 _txLong
 _rxLong         res
 
+numLongs
 tmp7v
-y
-_initRxPin
+_rcvyWait
 _txF16U
 _rxLeftovers    res
 
+commandBit
 tmp8v
-ind
-_initTxPin
+_initTmp
+_rcvyTmp
 _txRemaining
 _rxRemaining    res
 
-tmp9v
 errorCode
-_initDeviceAddress
+tmp9v
+_initCount
+_admTmp
+_rcvyCountdown
 _txCount
 _rxCountdown    res
 
-
 fit 496
+
+
 

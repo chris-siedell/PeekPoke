@@ -1,0 +1,112 @@
+=====================================
+PeekPoke Protocol.txt
+16 April 2018
+Chris Siedell
+http://siedell.com/projects/PeekPoke/
+=====================================
+
+PeekPoke is a tool for reading and writing the hub ram of a Parallax Propeller 
+P8X32A microcontroller from a computer. It also has the ability to execute
+arbitrary code sent from a computer, if allowed.
+
+PeekPoke is designed to use the Crow serial transport layer, which facilitates
+simple command and response protocols.
+
+The suggested port number is 112 (ascii 'p').
+
+The protocol identifier is "PeekPoke".
+
+
+Payload Format
+==============
+
+All commands have a four byte initial header: 0x70, 0x70, commandCode, 0x00.
+Any additional command parameters depend on the command.
+
+Responses also have a four byte initial header: 0x70, 0x70, commandCode, and
+statusCode. If the status code is zero then the response is a normal response,
+otherwise it is an error response.
+
+Error responses are always four bytes. The size and format of normal responses
+depends on the command.
+
+These are the command codes:
+    0 - getBasicInfo
+    1 - readHub
+    2 - writeHub
+    3 - payloadExec
+
+todo:
+    - getSerialParams
+    - setSerialParams
+    - revertSerialParams via break  
+
+These are the status codes:
+    0 - OK
+    1 - CommandNotAvailable
+    2 - MissingParameters
+    3 - RequestTooLarge
+
+
+getBasicInfo()
+==============
+
+Command payload, 4 bytes:
+        pos     len     description
+        0       4       initial header
+
+Response payload, 8 bytes:
+        pos     len     description
+        0       4       initial header
+        4       2       par
+        6       1       available commands bitmask
+        7       1       cogID
+
+The bit positions in the available commands bitmask correspond to the command
+codes (e.g. if bit 2 is set then writeHub is available).
+
+
+readHub(address, count)
+=======================
+
+Command payload, 8 bytes:
+        pos     len     description
+        0       4       initial header
+        4       2       address of read start, any alignment
+        6       2       count = number of bytes to read, may be zero
+
+Response payload, 4+count bytes:
+        pos     len     description
+        0       4       initial header
+        4+      count   the bytes read
+
+
+writeHub(address, data<uint8_t>[])
+==================================
+
+Command payload, 8 bytes:
+        pos     len     description
+        0       4       initial header
+        4       2       address of write start, any alignment
+        6       2       count = number of bytes to write, may be zero
+        8+      count   the bytes to write
+
+Response payload, 4 bytes:
+        pos     len     description
+        0       4       initial header
+
+
+payloadExec(code)
+=================
+
+Command payload, 8+ bytes:
+        pos     len     description
+        0       4       initial header
+        4+      -       code
+
+Response payload, 4+ bytes:
+        pos     len     description
+        0       4       initial header
+        4+      -       data
+
+

@@ -10,9 +10,9 @@ obj
 
 pub main
 
-    peekpoke.setParams(31, 30, 230400, 10)
+    peekpoke.setAllowPayloadExec(true)
 
-    peekpoke.new(@blinky)
+    peekpoke.start(1000)
 
     dira[27] := 1
     outa[27] := 1
@@ -21,7 +21,6 @@ pub main
 
     repeat
         waitcnt(0)
-
 
 
 dat
