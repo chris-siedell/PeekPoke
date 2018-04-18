@@ -1,13 +1,17 @@
 =====================================
 PeekPoke Protocol.txt
-16 April 2018
+17 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
 =====================================
 
 PeekPoke is a tool for reading and writing the hub ram of a Parallax Propeller 
-P8X32A microcontroller from a computer. It also has the ability to execute
-arbitrary code sent from a computer, if allowed.
+P8X32A microcontroller from a computer. PeekPoke also has additional features:
+    - getting the PAR register of the launched instance,
+    - getting and setting the serial timings,
+    - resetting the serial timings with a break condition, and
+    - executing arbitrary code sent by the PC (payloadExec).
+Some of these features may be disabled.
 
 PeekPoke is designed to use the Crow serial transport layer, which facilitates
 simple command and response protocols.
@@ -16,58 +20,72 @@ The suggested port number is 112 (ascii 'p').
 
 The protocol identifier is "PeekPoke".
 
+PeekPoke is implemented using PropCR, which means that it is fully cog
+contained. It also means that PropCR byte ordering must be used. (PyCrow has a
+'propcr_order=True' optional argument to send_command.) A PeekPoke service can
+be made using a different Crow device implemention, except that payloadExec
+would be difficult or impractical to support.
+
+
+Break Detection
+===============
+
+In the default implementation the serial timings will be reset to the last
+known good values when a break condition is detected. The last known good
+values are saved every time a valid command is received, even if the command
+is addressed to a different device or is too large for the device.
+
+Break detection can be disabled.
+
+If payloadExec is enabled then the break detection behavior may be changed
+remotely.
+
 
 Payload Format
 ==============
 
-All commands have a four byte initial header: 0x70, 0x70, commandCode, 0x00.
+All commands have a four byte initial header: 0x70, 0x70, 0x00, and commandCode.
 Any additional command parameters depend on the command.
 
-Responses also have a four byte initial header: 0x70, 0x70, commandCode, and
-statusCode. If the status code is zero then the response is a normal response,
+Responses also have a four byte initial header: 0x70, 0x70, statusCode, and
+commandCode. If the status code is zero then the response is a normal response,
 otherwise it is an error response.
 
 Error responses are always four bytes. The size and format of normal responses
 depends on the command.
 
+All multibyte values are in little-endian order.
+
 These are the command codes:
-    0 - getBasicInfo
+    0 - getPar
     1 - readHub
     2 - writeHub
-    3 - payloadExec
-
-todo:
-    - getSerialParams
-    - setSerialParams
-    - revertSerialParams via break  
+    3 - getSerialTimings
+    4 - setSerialTimings
+    5 - payloadExec
 
 These are the status codes:
     0 - OK
     1 - CommandNotAvailable
-    2 - MissingParameters
+    2 - IncorrectSize
     3 - RequestTooLarge
+ 
 
-
-getBasicInfo()
-==============
+getPar
+======
 
 Command payload, 4 bytes:
         pos     len     description
         0       4       initial header
 
-Response payload, 8 bytes:
+Response payload, 6 bytes:
         pos     len     description
         0       4       initial header
         4       2       par
-        6       1       available commands bitmask
-        7       1       cogID
-
-The bit positions in the available commands bitmask correspond to the command
-codes (e.g. if bit 2 is set then writeHub is available).
 
 
-readHub(address, count)
-=======================
+readHub
+=======
 
 Command payload, 8 bytes:
         pos     len     description
@@ -81,8 +99,8 @@ Response payload, 4+count bytes:
         4+      count   the bytes read
 
 
-writeHub(address, data<uint8_t>[])
-==================================
+writeHub
+========
 
 Command payload, 8 bytes:
         pos     len     description
@@ -95,9 +113,57 @@ Response payload, 4 bytes:
         pos     len     description
         0       4       initial header
 
+A single write command can be considered atomic since the data is included in
+a packet that is fully received into a buffer and checked for errors before
+performing the command.
 
-payloadExec(code)
-=================
+
+getSerialTimings
+================
+
+Command payload, 4 bytes:
+        pos     len     description
+        0       4       initial header
+
+Response payload, 32 bytes:
+        pos     len     description
+        0       4       initial header
+        4       4       bitPeriod0
+        8       4       bitPeriod1
+        12      4       startBitWait
+        16      4       stopBitDuration
+        20      4       interbyteTimeout
+        24      4       recoveryTime
+        28      4       breakMultiple
+
+All timings are in system clocks except breakMultiple, which is the number of
+recoveryTime intervals that the rx line must be continuously low before a break
+condition is detected.
+
+
+setSerialTimings
+================
+
+Command payload, 32 bytes:
+        pos     len     description
+        0       4       initial header
+        4       4       bitPeriod0
+        8       4       bitPeriod1
+        12      4       startBitWait
+        16      4       stopBitDuration
+        20      4       interbyteTimeout
+        24      4       recoveryTime
+        28      4       breakMultiple
+
+Response payload, 4 bytes:
+        pos     len     description
+        0       4       initial header
+
+The timings take effect after the acknowledgement response is sent.
+
+
+payloadExec
+===========
 
 Command payload, 8+ bytes:
         pos     len     description
@@ -108,5 +174,12 @@ Response payload, 4+ bytes:
         pos     len     description
         0       4       initial header
         4+      -       data
+
+The code is copied into the cog starting at register 1 (the second register),
+and it may extend up through register 65 (so there can be up to 260 bytes of
+instructions and data in the command). Execution will start at register 1.
+
+Additional details for payloadExec code can be found in the file
+"payloadExec Template.spin".
 
 

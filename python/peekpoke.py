@@ -12,8 +12,10 @@ class PeekPoke():
         self.port = 112
         self.propcr_order = True
 
-        self.max_read = 400
-        self.max_write = 400
+        self._max_atomic_read = 260
+        self._max_atomic_write = 256
+
+        self._break_duration_ms = 400
 
 
     def _check_twobyte(self, value, name):
@@ -26,6 +28,11 @@ class PeekPoke():
             raise ValueError(name + ' must be in the range [0, 65532] and divisible by four')
 
 
+    def get_par(self):
+        response = self._send_command(0, 6)
+        return int.from_bytes(response[4:6], 'little')
+
+
     def read_hub(self, address, count):
 
         self._check_twobyte(address, 'address')
@@ -36,7 +43,7 @@ class PeekPoke():
         result = bytearray()
 
         while count > 0:
-            atomic_count = min(count, self.max_read)
+            atomic_count = min(count, self._max_atomic_read)
             count -= atomic_count
             result += self._atomic_read_hub(address, atomic_count)
             address = (address + atomic_count)%65536
@@ -46,12 +53,10 @@ class PeekPoke():
 
     def _atomic_read_hub(self, address, count):
         
-        # todo: try command again for UnrecognizedCommand, toggling propcr_order
-
         self._check_twobyte(address, 'address')
 
-        if count < 0 or count > 65536:
-            raise ValueError("count must be in the range [0, 65536].")
+        if count < 0 or count > self._max_atomic_read:
+            raise ValueError("Atomic hub reads may not exceed " + str(self._max_atomic_read) + " bytes.")
 
         arguments = address.to_bytes(2, 'little') + count.to_bytes(2, 'little')
         payload = self._send_command(1, 4 + count, arguments)
@@ -66,12 +71,12 @@ class PeekPoke():
         count = len(data)
 
         if count > 65536:
-            raise ValueError('the amount of data must not exceed 65536 bytes')
+            raise ValueError('Writes can not exceed 65536 bytes.')
 
         index = 0
 
         while count > 0:
-            atomic_count = min(count, self.max_write)
+            atomic_count = min(count, self._max_atomic_write)
             count -= atomic_count
             self._atomic_write_hub(address, data[index:index+atomic_count])
             address = (address + atomic_count)%65536
@@ -84,15 +89,81 @@ class PeekPoke():
 
         count = len(data)
 
-        if count > 65536:
-            raise ValueError('the amount of data must not exceed 65536 bytes')
+        if count > self._max_atomic_write:
+            raise ValueError("Atomic hub writes may not exceed " + str(self._max_atomic_write) + " bytes.")
 
         arguments = address.to_bytes(2, 'little') + (len(data)).to_bytes(2, 'little') + data
         self._send_command(2, 4, arguments)
 
 
+    def get_baudrate(self):
+        return self.host.serial.baudrate
+
+
+    def set_baudrate(self, baudrate, clkfreq=None):
+        curr_baudrate = self.host.serial.baudrate
+        if curr_baudrate == baudrate:
+            return
+        if clkfreq is None:
+            # When clkfreq is inferred from the current timings it introduces errors that
+            # may be amplified when multiple baudrate changes are made. One solution would
+            # be to maintain a table of known good timings for each baudrate so they would
+            # not need to be recalculated, but the table would only exist for the life
+            # of the python PeekPoke object, unless stored on the device in the StaticBuffer.
+            # Another solution is to ask the user to provide clkfreq.
+            timings = self._get_serial_timings()
+            clkfreq = ((timings['bit_period_0'] + timings['bit_period_1']) * curr_baudrate) / 2
+        timings = {}
+        two_bit_period = int((2 * clkfreq) / baudrate)
+        if two_bit_period < 52:
+            raise ValueError("The baudrate " + str(baudrate) + " can not be supported by the device given a clkfreq of " + str(clkfreq) + ".")
+        timings['bit_period_0'] = two_bit_period >> 1
+        timings['bit_period_1'] = timings['bit_period_0'] + (two_bit_period & 1)
+        timings['start_bit_wait'] = max((timings['bit_period_0'] >> 1) - 10, 5)
+        timings['stop_bit_duration'] = int((10*clkfreq) / baudrate) - 5*timings['bit_period_0'] - 4*timings['bit_period_1'] + 1
+        timings['interbyte_timeout'] = max(int(clkfreq/1000), two_bit_period)    # max of 1ms or 2 bit periods
+        timings['recovery_time'] = two_bit_period << 3                      # 16 bit periods
+        # For the break multiple, we use 1/2 of self._break_duration_ms for dependable detection.
+        timings['break_multiple'] = int((self._break_duration_ms * clkfreq/2000) / timings['recovery_time'])
+        self._set_serial_timings(timings)
+        self.host.serial.baudrate = baudrate
+
+
+    def _get_serial_timings(self):
+
+        response = self._send_command(3, 32)
+
+        timings = {}
+        timings['bit_period_0'] = int.from_bytes(response[4:8], 'little')
+        timings['bit_period_1'] = int.from_bytes(response[8:12], 'little')
+        timings['start_bit_wait'] = int.from_bytes(response[12:16], 'little')
+        timings['stop_bit_duration'] = int.from_bytes(response[16:20], 'little')
+        timings['interbyte_timeout'] = int.from_bytes(response[20:24], 'little')
+        timings['recovery_time'] = int.from_bytes(response[24:28], 'little')
+        timings['break_multiple'] = int.from_bytes(response[28:32], 'little')
+        return timings
+
+
+    def _set_serial_timings(self, timings):
+
+        arguments = bytearray()
+        arguments += timings['bit_period_0'].to_bytes(4, 'little')
+        arguments += timings['bit_period_1'].to_bytes(4, 'little')
+        arguments += timings['start_bit_wait'].to_bytes(4, 'little')
+        arguments += timings['stop_bit_duration'].to_bytes(4, 'little')
+        arguments += timings['interbyte_timeout'].to_bytes(4, 'little')
+        arguments += timings['recovery_time'].to_bytes(4, 'little')
+        arguments += timings['break_multiple'].to_bytes(4, 'little')
+
+        self._send_command(4, 4, arguments)
+
+
     def payload_exec(self, code):
-        return self._send_command(3, arguments=code)
+
+        if len(code) < 4:
+            raise ValueError("There must be at least 4 bytes of code for payload_exec.")
+
+        return self._send_command(5, arguments=code)
 
 
 
@@ -157,17 +228,6 @@ class PeekPoke():
 #        return info
 #
 
-    def get_basic_info(self):
-        
-        payload = self._send_command(0, 8)
-        
-        info = {}
-        info['par'] = int.from_bytes(payload[4:6], 'little')
-        info['read_hub_available'] = bool(payload[6] & 0b0010)
-        info['write_hub_available'] = bool(payload[6] & 0b0100)
-        info['payload_exec_available'] = bool(payload[6] & 0b1000)
-        info['cog_id'] = payload[7]
-        return info
 
 
     def _send_command(self, code, expected_rsp_size=None, arguments=None):
@@ -175,7 +235,7 @@ class PeekPoke():
         if self.host is None:
             raise RuntimeError("The host property must be defined to send PeekPoke commands.")
 
-        command = bytearray(b'\x70\x70') + code.to_bytes(2, 'little')
+        command = bytearray(b'\x70\x70\x00') + code.to_bytes(1, 'little')
         if arguments is not None:
             command += arguments
 
@@ -185,16 +245,16 @@ class PeekPoke():
             raise PeekPokeError("The response has fewer than four bytes.")
         if response[0] != 0x70 or response[1] != 0x70:
             raise PeekPokeError("The response identifier is incorrect.")
-        if response[2] != code:
+        if response[3] != code:
             raise PeekPokeError("The response code is incorrect.")
-        if response[3] == 1:
+        if response[2] == 1:
             raise PeekPokeError("The command is not available on the device.")
-        if response[3] == 2:
-            raise PeekPokeError("The device reports that the command had missing parameters.")
-        if response[3] == 3:
+        if response[2] == 2:
+            raise PeekPokeError("The command did not have the correct size.")
+        if response[2] == 3:
             raise PeekPokeError("The requested response would be too large for the device.")
-        if response[3] > 3:
-            raise PeekPokeError("The device returned an unknown error code (" + str(response[3]) + ").")
+        if response[2] > 3:
+            raise PeekPokeError("The device returned an unknown error code (" + str(response[2]) + ").")
         if expected_rsp_size is not None:
             if len(response) != expected_rsp_size:
                 raise PeekPokeError("The response does not have the expected size.")

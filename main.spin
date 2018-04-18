@@ -10,12 +10,10 @@ obj
 
 pub main
 
-    peekpoke.setAllowPayloadExec(true)
+    peekpoke.start(2018) 'expect 2016 due to lower bits masking
 
-    peekpoke.start(1000)
-
-    dira[27] := 1
-    outa[27] := 1
+'    dira[27] := 1
+ '   outa[27] := 1
 
     cognew(@Blinky, 0)
 
