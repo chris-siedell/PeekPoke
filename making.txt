@@ -1,0 +1,69 @@
+making.txt
+24 April 2018
+
+These are the steps to make PeekPoke.spin from PropCR-BD.spin. It is assumed
+that there is an older, working PeekPoke.spin file to use as a template.
+
+1. Change the initial document header.
+
+2. Change the initial comment section (be sure to update the 'originally built
+using' PropCR version).
+
+3. Remove the 'Compile-Time Constants' in the CON section. Find all instances
+of 'cNumPayloadRegisters' and replace them with the fixed value of 66. Find
+all instances of 'cMaxPayloadSize' and replace them with 264 (0x108).
+
+4. Change the default port (cUserPort) to 112.
+
+5. Put in the user code.
+
+6. Make changes to temporaries. This involves adding the reset serial timings
+in registers 478-484, and also adding aliases for tmp* registers (e.g.
+scratch, x, y, etc.).
+
+7. Add jump to BreakHandler at end of RecoveryMode and remove PropCR-BD's
+BreakHandler.
+
+8. Add '_RcvyLoopJump' label to recovery mode's djnz. Change the ':loop' label
+to '_RcvyLoopTop' and modify the djnz.
+
+9. Modify the getDeviceInfoBuffer for a minimal response. Adjust the payload
+size for the response. Remove the initialization code that sets the cog
+number.
+
+10. Modify the getPortInfoBuffer_User so that it reports the service
+identifier as 'PeekPoke'. Adjust the payload size for the response.
+
+11. Move the kFF00_0000 constant into the 'fixed area' (the registers between
+the payload buffer and ReceiveCommand).
+
+12. Move the k4143 constant into the spot occupied by kFFFF (in the shifted
+parsing code), and move kFFFF to the fixed area. This step (and the previous)
+make these constants more easily accessible by payloadExec code.
+
+13. Add PeekPoke specific initialization code (to populate the reset params,
+and to enable/disable features). Add the initPermissions register, and make
+sure initEnd is correctly placed.
+
+14. Add the PeekPoke specific Spin methods, including the start method that
+takes PAR as an argument.
+
+15. Add items to fixed area:
+    - constants (kOneInDField, kOneInDAndSFields, k7070, and
+      sendResponseAddr),
+    - SendResponseAndReturnProxy routine,
+    - ShiftSeven routine,
+    - the PeekPoke jump table,
+    - the error reporting routines,
+    - the packet received routine,
+    - the break handler routine,
+    - the static buffer.
+
+16. Make sure items in fixed area are located where payloadExec code expects
+them.
+
+17. Add PeekPoke permissions constants to CON section.
+
+18. Add the call to PacketReceived in ReceiveCommandFinish (immediately after
+the check to ensure a broadcast command does not expect a response).
+

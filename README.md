@@ -1,42 +1,54 @@
 # PeekPoke
 
-PeekPoke is a serial protocol for reading and writing a Propeller's hub RAM.
+PeekPoke is a utility for reading and writing a Propeller's hub RAM from a PC.
+It consists of two parts: a python package for sending commands from the PC, and
+a PASM program for responding to commands. The PASM program is entirely
+cog-contained after launch.
 
-The Propeller implementation here is designed to be entirely cog-contained after launch. It supports the writeBytes, writeLongs, and readLongs commands -- the other commands can be composed from these. Theoretically, it can operate at 3Mbps, but refer to the notes on the PropCR page about problems at this speed.
+PeekPoke allows the serial timings to be changed remotely (this feature can be
+disabled). By default, if a break condition is detected the serial parameters will
+be reset to their last known good values.
 
-This project depends on PropCR: https://github.com/chris-siedell/PropCR
+If the payloadExec feature is enabled PeekPoke will allow the PC to execute
+arbitrary code, effectively allowing any command that can be implemented in 65
+registers (plus the 16 register static buffer).
 
-## Example 
+By default, all features of PeekPoke except payloadExec are enabled. There are
+Spin methods that can enable and disable some of the features.
 
-PC side:
-```cpp
-#include "PeekPoke.hpp"
+Each PeekPoke instance requires a unique address on the serial line (addresses
+may be 1 to 31, 1 is the default). PeekPoke uses port 112 by default, but this
+may be changed.
 
-int main() {
-  PeekPoke pp("/dev/cu.usbserial-XXXX");  
-  std::vector<uint32_t> longs;
+The following methods are available to change the default settings before launch.
+Some must be called in a particular sequence.
+
+- `setPins(rxPin, txPin)`
+- `setBaudrate(baudrate)`
+- `setInterbyteTimeoutInMS(milliseconds)` - if called, MUST follow setBaudrate
+- `setInterbyteTimeoutInBitPeriods(count)` - if called, MUST follow setBaudrate
+- `setRecoveryTimeInMS(milliseconds)`
+- `setRecoveryTimeInBitPeriods(count)` - if called, MUST follow setBaudrate
+- `setBreakThresholdInMS(milliseconds)` - MUST be called if setRecoveryTime\* is called
+- `setAddress(address)`
+- `setPort(port)`
+- `enableWriteHub`
+- `disableWriteHub`
+- `enableSetSerialParams`
+- `disableSetSerialParams`
+- `enablePayloadExec`
+- `disablePayloadExec`
+- `enableBreakDetection`
+- `disableBreakDetection`
   
-  // after this call longs contains the two long values at hub addresses 32000 and 32004
-  pp.readLongs(32000, 2, longs);
-  
-  std::vector<uint8_t> bytes;
-  bytes.push_back(0x05);
-  
-  // after this call hub address 30000 has value 0x05
-  pp.writeBytes(30000, bytes);
-}
-```
-Propeller side:
-```spin
-obj
+If the recovery time is set, then `setBreakThresholdInMS` must be called afterwards
+in order to recalculate the timings constants, regardless if the threshold has changed.
 
-  peekpoke : "PeekPoke"
-  
-pub main
+Calling the above methods has no effect on already launched instances.
 
-  'use pins 30/31 at 115200 bps, and device address 1 (Crow protocol parameter)
-  peekpoke.setParams(31, 30, 115200, 1)
+`start` will not return until the new instance is completely loaded, so calling code
+may immediately prepare to launch another instance.
   
-  'after the following call the PeekPoke instance is running and the hub space can be repurposed
-  peekpoke.new
-```
+`start` takes an argument that is passed to the new instance using the PAR register.
+The PC can use the `get_par` command to obtain its value. 
+

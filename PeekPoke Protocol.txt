@@ -1,11 +1,11 @@
-=====================================
+======================================
 PeekPoke Protocol.txt
-17 April 2018
+24 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
-=====================================
+======================================
 
-PeekPoke is a tool for reading and writing the hub ram of a Parallax Propeller 
+PeekPoke is a tool for reading and writing the hub RAM of a Parallax Propeller 
 P8X32A microcontroller from a computer. PeekPoke also has additional features:
     - getting the PAR register of the launched instance,
     - getting and setting the serial timings,
@@ -20,11 +20,8 @@ The suggested port number is 112 (ascii 'p').
 
 The protocol identifier is "PeekPoke".
 
-PeekPoke is implemented using PropCR, which means that it is fully cog
-contained. It also means that PropCR byte ordering must be used. (PyCrow has a
-'propcr_order=True' optional argument to send_command.) A PeekPoke service can
-be made using a different Crow device implemention, except that payloadExec
-would be difficult or impractical to support.
+If using payloadExec with a PropCR-BD implementation, then the payload buffer
+must be exactly 66 registers.
 
 
 Break Detection
@@ -44,15 +41,12 @@ remotely.
 Payload Format
 ==============
 
-All commands have a four byte initial header: 0x70, 0x70, 0x00, and commandCode.
-Any additional command parameters depend on the command.
+All commands have a four byte initial header: 0x70, 0x70, 0x00, and
+commandCode. Any additional payload data depends on the command.
 
-Responses also have a four byte initial header: 0x70, 0x70, statusCode, and
-commandCode. If the status code is zero then the response is a normal response,
-otherwise it is an error response.
+The response repeats the same initial four byte header.
 
-Error responses are always four bytes. The size and format of normal responses
-depends on the command.
+Errors are reported using Crow-level error responses.
 
 All multibyte values are in little-endian order.
 
@@ -63,12 +57,6 @@ These are the command codes:
     3 - getSerialTimings
     4 - setSerialTimings
     5 - payloadExec
-
-These are the status codes:
-    0 - OK
-    1 - CommandNotAvailable
-    2 - IncorrectSize
-    3 - RequestTooLarge
  
 
 getPar
@@ -159,7 +147,7 @@ Response payload, 4 bytes:
         pos     len     description
         0       4       initial header
 
-The timings take effect after the acknowledgement response is sent.
+Changes take effect after the acknowledgement response is sent.
 
 
 payloadExec
@@ -177,9 +165,7 @@ Response payload, 4+ bytes:
 
 The code is copied into the cog starting at register 1 (the second register),
 and it may extend up through register 65 (so there can be up to 260 bytes of
-instructions and data in the command). Execution will start at register 1.
-
-Additional details for payloadExec code can be found in the file
-"payloadExec Template.spin".
-
+instructions and data in the command). Execution will start at register 1. The
+payload code must prepare its own response and call the sending routines when
+done.
 
