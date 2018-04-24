@@ -277,7 +277,7 @@ initShift                       mov         initShiftLimit-1, initShiftLimit-1-(
 
                                 jmp         #ReceiveCommand
 
-initPermissions         long    $ff
+initPermissions         long    $ff ^ cEnablePayloadExec
 
 { initEnd is the last real (not reserved) register before initShiftStart. Its address is used by the initialization shifting code. }
 initEnd

@@ -46,9 +46,9 @@ in order to recalculate the timings constants, regardless if the threshold has c
 
 Calling the above methods has no effect on already launched instances.
 
-`start` will not return until the new instance is completely loaded, so calling code
-may immediately prepare to launch another instance.
-  
 `start` takes an argument that is passed to the new instance using the PAR register.
 The PC can use the `get_par` command to obtain its value. 
+
+`start` will not return until the new instance is completely loaded, so calling code
+may immediately prepare to launch another instance.
 
