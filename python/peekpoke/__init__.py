@@ -11,8 +11,8 @@ from crow.host_serial import HostSerialSettings
 from crow.errors import ClientError
 
 
-__version__ = '0.4.0'
-VERSION = __version
+__version__ = '0.4.1'
+VERSION = __version__
 
 
 class PeekPoke():
