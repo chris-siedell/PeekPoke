@@ -1,6 +1,6 @@
 ======================================
 PeekPoke Protocol.txt
-24 April 2018
+25 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
 ======================================
@@ -10,7 +10,8 @@ P8X32A microcontroller from a computer. PeekPoke also has additional features:
     - getting the PAR register of the launched instance,
     - getting and setting the serial timings,
     - resetting the serial timings with a break condition, and
-    - executing arbitrary code sent by the PC (payloadExec).
+    - executing arbitrary code sent by the PC.
+
 Some of these features may be disabled.
 
 PeekPoke is designed to use the Crow serial transport layer, which facilitates
@@ -19,9 +20,6 @@ simple command and response protocols.
 The suggested port number is 112 (ascii 'p').
 
 The protocol identifier is "PeekPoke".
-
-If using payloadExec with a PropCR-BD implementation, then the payload buffer
-must be exactly 66 registers.
 
 
 Break Detection
@@ -33,9 +31,6 @@ values are saved every time a valid command is received, even if the command
 is addressed to a different device or is too large for the device.
 
 Break detection can be disabled.
-
-If payloadExec is enabled then the break detection behavior may be changed
-remotely.
 
 
 Payload Format
@@ -156,16 +151,20 @@ payloadExec
 Command payload, 8+ bytes:
         pos     len     description
         0       4       initial header
-        4+      -       code
+        4+      -       PASM code
 
-Response payload, 4+ bytes:
+Response payload, 4+ bytes (if sent):
         pos     len     description
         0       4       initial header
         4+      -       data
 
-The code is copied into the cog starting at register 1 (the second register),
+The payloadExec option requires a pre-arranged cog layout in order to work.
+
+The PropCR-BD based implementation places the code starting at register 1,
 and it may extend up through register 65 (so there can be up to 260 bytes of
 instructions and data in the command). Execution will start at register 1. The
 payload code must prepare its own response and call the sending routines when
 done.
+
+If a response is returned it must begin with the standard initial header.
 

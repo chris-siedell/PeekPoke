@@ -10,6 +10,7 @@ obj
 
 pub main
 
+    peekpoke.enablePayloadExec
     peekpoke.start(2018) 'expect 2016 due to lower bits masking
 
 '    dira[27] := 1

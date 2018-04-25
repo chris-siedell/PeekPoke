@@ -1,13 +1,13 @@
 {
-================================================
+==================================================
 PeekPoke.spin
 Version 0.4.0 (alpha/experimental)
 24 April 2018
 Chris Siedell
-source:
-python:
+source: https://github.com/chris-siedell/PeekPoke
+python: https://pypi.org/project/peekpoke/
 homepage: http://siedell.com/projects/PeekPoke/
-================================================
+==================================================
 
   PeekPoke is a utility for reading and writing a Propeller's hub ram from a PC. It
 is entirely cog-contained after launch.
@@ -216,8 +216,6 @@ pub disableBreakDetection
     initPermissions &= !cEnableBreakDetection
 
 pub start(__par)
-    dira[27] := 1
-    outa[27] := 1
     result := cognew(@Init, __par) + 1
     waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
 
