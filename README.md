@@ -5,6 +5,9 @@ It consists of two parts: a python package for sending commands from the PC, and
 a PASM program for responding to commands. The PASM program is entirely
 cog-contained after launch.
 
+The Python package may be installed using `pip install peekpoke`, or by downloading
+from PyPI.org at <https://pypi.org/project/peekpoke/>.
+
 PeekPoke allows the serial timings to be changed remotely (this feature can be
 disabled). By default, if a break condition is detected the serial parameters will
 be reset to their last known good values.
