@@ -14,7 +14,7 @@ be reset to their last known good values.
 
 If the payloadExec feature is enabled PeekPoke will allow the PC to execute
 arbitrary code, effectively allowing any command that can be implemented in 65
-registers (plus the 16 register static buffer).
+registers (plus the static buffer).
 
 By default, all features of PeekPoke except payloadExec are enabled. There are
 Spin methods that can enable and disable some of the features.

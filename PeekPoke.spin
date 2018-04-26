@@ -1,8 +1,8 @@
 {
 ==================================================
 PeekPoke.spin
-Version 0.4.0 (alpha/experimental)
-24 April 2018
+Version 0.4.1 (alpha/experimental)
+25 April 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
@@ -18,7 +18,7 @@ be reset to their last known good values.
 
   If the payloadExec feature is enabled PeekPoke will allow the PC to execute
 arbitrary code, effectively allowing any command that can be implemented in 65
-registers (plus the 16 register StaticBuffer).
+registers (plus the static buffer).
 
   By default, all features of PeekPoke except payloadExec are enabled. There are
 Spin methods that can enable and disable some features.
@@ -53,11 +53,11 @@ in order to recalculate the break multiple, regardless if the threshold has chan
 
   Calling the above methods has no effect on already launched instances.
 
-  start will not return until the new instance is completely loaded, so calling code
-may immediately prepare to launch another instance.
-  
   start takes an argument that is passed to the new instance using the PAR register.
 The PC can use the getPar command to obtain its value. 
+
+  start will not return until the new instance is completely loaded, so calling code
+may immediately prepare to launch another instance.
 
   Since this implementation uses PropCR, make sure to use PropCR byte ordering when
 sending a command.
@@ -266,7 +266,7 @@ initShift                       mov         initShiftLimit-1, initShiftLimit-1-(
                         if_nc   movs        _JumpSetSerialParams, #ReportCommandNotAvailable
 
                                 test        initPermissions, #cEnablePayloadExec        wc
-                        if_c    movs        _JumpPayloadExec, #PayloadExec
+                        if_c    movs        _JumpPayloadExec, #Payload+1
                         if_nc   movs        _JumpPayloadExec, #ReportCommandNotAvailable
 
                                 test        initPermissions, #cEnableBreakDetection     wc
@@ -289,14 +289,29 @@ org 66
 
 { ==========  Begin PropCR Block  ========== }
 
-{   It is possible to place res'd registers here (between initEnd and initShiftStart) -- the shifting
-  code will accommodate them. However, bitPeriod0 must always be at an even address register. }
+{ initShiftStart is the first non-res'd register to be shifted into place. }
+initShiftStart
+
+{ Sending Addresses
+    These jumps/addresses exist for the benefit of payloadExec code. Since the SendResponse
+  jump is the first register after the payload, payloadExec code could let execution
+  go past the buffer to send a response (only if it was a full payload, since otherwise
+  the registers in between would be undefined).
+} 
+sendResponseAddr                jmp         #SendResponse                   '
+sendResponseAndResetPointerAddr jmp         #SendResponseAndResetPointer    '
+
+{ SendResponseAndReturnProxy (jmpret)
+    This routine is used by payloadExec code.
+    Usage (in payloadExec):     jmpret      AAA, #BBB
+}
+SendResponseAndReturnProxy      call        #SendResponseAndReturn          'AAA
+                                jmp         #0-0                            'BBB
 
 { Settings Notes
     The following registers store some settings. Some settings are stored in other locations (within
   instructions in some cases), and some are stored in multiple locations.
 }
-initShiftStart
 bitPeriod0              long    cBitPeriod0                                 ' - MUST be at even addressed register
 bitPeriod1              long    cBitPeriod1                                 ' - MUST immeidately follow bitPeriod1
 startBitWait            long    cStartBitWait                               '
@@ -312,15 +327,6 @@ kOneInDAndSFields       long    $201                                        '
 k7070                   long    $7070                                       '
 kFF00_0000              long    $ff00_0000                                  '
 kFFFF                   long    $ffff                                       '
-sendResponseAddr        jmp         #SendResponse                           ' - this exists for benefit of payloadExec code
-
-{ SendResponseAndReturnProxy (jmpret)
-    This routine is used by payloadExec code.
-    Usage (in payloadExec):     jmpret      81, #80
-}
-SendResponseAndReturnProxy      call        #SendResponseAndReturn          '
-                                jmp         #0-0                            '
-
 
 { ShiftSeven (call)
     This helper routine shifts seven cog registers. It is used to support the serial params commands.
@@ -339,7 +345,7 @@ PeekPokeJumpTable               jmp         #HubReadWrite                   ' - 
 _JumpWriteHub                   jmp         #HubReadWrite                   ' - command 2, writeHub; set s-field to ReportCommandNotAvailable to disable; see note above
                                 jmp         #GetSerialParams                ' - command 3, getSerialParams
 _JumpSetSerialParams            jmp         #SetSerialParams                ' - command 4, setSerialParams; set s-field to ReportCommandNotAvailable to disable
-_JumpPayloadExec                jmp         #PayloadExec                    ' - command 5, payloadExec; set s-field to ReportCommandNotAvailable to disable
+_JumpPayloadExec                jmp         #ReportCommandNotAvailable      ' - command 5, payloadExec; set s-field to ReportCommandNotAvailable to disable
                                 { commands 6+ are not available, so next
                                     instruction must be the start of
                                     ReportCommandNotAvailable }
@@ -350,7 +356,6 @@ ReportIncorrectSize             mov         Payload, #cIncorrectCommandSize '
                                 jmp         #SendCrowError                  '
 ReportRequestTooLarge           mov         Payload, #cRequestTooLarge      '
                                 jmp         #SendCrowError                  '
-
 
 { PacketReceived (call)
     This routine is called from ReceiveCommandFinish after determining that a valid packet has been
@@ -373,7 +378,6 @@ PacketReceived                  jmp         #$+1                            'AAA
                                 call        #ShiftSeven                     '
 PacketReceived_ret              ret                                         'CCCC
 
-
 { BreakHandler 
     The default behavior when a break is detected is to reset the serial timings to the last known
   good values.
@@ -389,7 +393,6 @@ BreakHandler                    movd        _Shift, #bitPeriod0             '
 
                                 jmp         #ReceiveCommand                 '
 
-
 { StaticBuffer
     This buffer is available for payloadExec's use. It can be used to store state between
   commands.
@@ -398,8 +401,7 @@ BreakHandler                    movd        _Shift, #bitPeriod0             '
     Being immediately before ReceiveCommand allows execution to go there without a jump, if
   space is very tight.
 }
-StaticBuffer            long    0[16]                                       '
-
+StaticBuffer            long    0[18]                                       '
 
 { ReceiveCommand (jmp)
     This routine waits for a command and then processes it in ReceiveCommandFinish. It makes use
@@ -1063,14 +1065,6 @@ SetSerialParams
                                 call        #ShiftSeven
 
                                 jmp         #ReceiveCommand
-
-
-{ payloadExec }
-PayloadExec
-                                cmp         payloadSize, #8             wc      'c=1 payload too short
-                        if_c    jmp         #ReportIncorrectSize
-                                jmp         #Payload+1                          'payload execution starts at second long
-
 
 
 { ==========  Begin Res'd Variables and Temporaries ========== }
