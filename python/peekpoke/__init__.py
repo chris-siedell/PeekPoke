@@ -1,5 +1,5 @@
 # PeekPoke
-# 25 April 2018
+# 26 April 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -11,7 +11,7 @@ from crow.host_serial import HostSerialSettings
 from crow.errors import ClientError
 
 
-__version__ = '0.4.1'
+__version__ = '0.5.0'
 VERSION = __version__
 
 
@@ -85,55 +85,115 @@ class PeekPoke():
         self._port = port
 
     def get_par(self):
-        transaction = self._send_command(0)
-        return PeekPoke.parse_get_par(transaction)
+        info = self._get_info()
+        return info.par
 
     def _check_hub_address(self, hub_address):
         if hub_address < 0 or hub_address > 65535:
             raise ValueError("hub_address must be 0 to 65535.")
 
-    def read_hub(self, hub_address, count):
+    def read_hub(self, hub_address, count, *, atomic_only=False):
         self._check_hub_address(hub_address)
         if count < 0 or count > 65536:
             raise ValueError("count must be 0 to 65536.")
+        if atomic_only and count > PeekPoke.MAX_ATOMIC_READ:
+            raise ValueError("Atomic hub reads may not exceed " + str(PeekPoke.MAX_ATOMIC_READ) + "bytes.")
         result = bytearray()
         while count > 0:
             atomic_count = min(count, PeekPoke.MAX_ATOMIC_READ)
             count -= atomic_count
-            result += self.atomic_read_hub(hub_address, atomic_count)
+            result += self._read_hub(hub_address, atomic_count)
             hub_address = (hub_address + atomic_count)%65536
         return result
 
-    def atomic_read_hub(self, hub_address, count):
-        self._check_hub_address(hub_address)
-        if count < 0 or count > PeekPoke.MAX_ATOMIC_READ:
-            raise ValueError("Atomic hub reads may not exceed " + str(PeekPoke.MAX_ATOMIC_READ) + " bytes.")
-        data = hub_address.to_bytes(2, 'little') + count.to_bytes(2, 'little')
-        transaction = self._send_command(1, data)
-        transaction.count = count
-        return PeekPoke.parse_read_hub(transaction)
 
-    def write_hub(self, hub_address, data):
+    def write_hub(self, hub_address, data, *, atomic_only=False):
         self._check_hub_address(hub_address)
         count = len(data)
         if count > 65536:
-            raise ValueError("Hub writes can not exceed 65536 bytes.")
+            raise ValueError("Hub writes may not exceed 65536 bytes.")
+        if atomic_only and count > PeekPoke.MAX_ATOMIC_WRITE:
+            raise ValueError("Atomic hub writes may not exceed " + str(PeekPoke.MAX_ATOMIC_WRITE) + " bytes.")
         index = 0
         while count > 0:
             atomic_count = min(count, PeekPoke.MAX_ATOMIC_WRITE)
             count -= atomic_count
-            self.atomic_write_hub(hub_address, data[index:index+atomic_count])
+            self._write_hub(hub_address, data[index:index+atomic_count])
             hub_address = (hub_address + atomic_count)%65536
             index += atomic_count
 
-    def atomic_write_hub(self, hub_address, data):
+
+    def read_hub_str(self, hub_address, max_count, encoding='latin_1', errors='replace', *, atomic_only=False):
         self._check_hub_address(hub_address)
-        count = len(data)
-        if count > PeekPoke.MAX_ATOMIC_WRITE:
-            raise ValueError("Atomic hub writes may not exceed " + str(PeekPoke.MAX_ATOMIC_WRITE) + " bytes.")
-        cmd_data = hub_address.to_bytes(2, 'little') + count.to_bytes(2, 'little') + data
+        if max_count < 0 or max_count > 65536:
+            raise ValueError("max_count must be 0 to 65536.")
+        result = bytearray()
+        while max_count > 0:
+            atomic_max_count = min(max_count, PeekPoke.MAX_ATOMIC_READ)
+            max_count -= atomic_max_count
+            result += self._read_hub_str(hub_address, atomic_max_count)
+            hub_address = (hub_address + atomic_max_count)%65536
+            if result[-1] == 0:
+                break
+        if result[-1] == 0:
+            return result[0:-1].decode(encoding=encoding, errors=errors)
+        else:
+            return result.decode(encoding=encoding, errors=errors)
+
+    def get_token_bytes(self):
+        transaction = self._send_command(6)
+        return PeekPoke.parse_token_command(transaction)
+
+    def get_token(self, *, byteorder='little', signed=False):
+        token_bytes = self.get_token_bytes()
+        return int.from_bytes(token_bytes, byteorder, signed=signed)
+
+    def set_token(self, token, *, byteorder='little', signed=False):
+        if token < 0 and not signed:
+            raise ValueError("Please use the 'signed=True' argument for negative numbers.") 
+        token_bytes = token.to_bytes(4, byteorder, signed=signed)
+        prev_token_bytes = self.set_token_bytes(token_bytes)
+        return int.from_bytes(prev_token_bytes, byteorder, signed=signed)
+
+    def set_token_bytes(self, token, *, use_padding=True):
+        if len(token) < 4:
+            if use_padding:
+                new_token = bytearray(4)
+                new_token[0:len(token)] = token[0:]
+                token = new_token
+            else:
+                raise ValueError("The token requires exactly four bytes if padding is not used.")
+        if len(token) > 4:
+            raise ValueError("The token is a four-byte value (too many bytes provided).")
+        transaction = self._send_command(7, token)
+        return PeekPoke.parse_token_command(transaction)
+
+    def _get_info(self):
+        transaction = self._send_command(0)
+        return PeekPoke.parse_get_info(transaction)
+
+    def _read_hub(self, hub_address, count):
+        # It is assumed that hub_address and count have legal values, specifically
+        #  hub_address is in [0, 65535] and count is in [0, MAX_ATOMIC_READ]
+        cmd_data = hub_address.to_bytes(2, 'little') + count.to_bytes(2, 'little')
+        transaction = self._send_command(1, cmd_data)
+        transaction.count = count
+        return PeekPoke.parse_read_hub(transaction)
+
+    def _write_hub(self, hub_address, data):
+        # It is assumed that hub_address and data have legal values, specifically
+        #  hub_address is in [0, 65535] and len(data) is in [0, MAX_ATOMIC_WRITE]
+        cmd_data = hub_address.to_bytes(2, 'little') + len(data).to_bytes(2, 'little') + data
         transaction = self._send_command(2, cmd_data)
-        PeekPoke.validate_header(transaction)
+        PeekPoke.validate_acknowledgement(transaction)
+
+    def _read_hub_str(self, hub_address, max_count):
+        # It is assumed that hub_address and count have legal values, specifically
+        #  hub_address is in [0, 65535] and count is in [0, MAX_ATOMIC_READ]
+        cmd_data = hub_address.to_bytes(2, 'little') + max_count.to_bytes(2, 'little')
+        transaction = self._send_command(3, cmd_data)
+        transaction.max_count = max_count
+        return PeekPoke.parse_read_hub_str(transaction)
 
     @property
     def baudrate(self):
@@ -182,17 +242,17 @@ class PeekPoke():
         self._host.serial_port.serial.send_break(self._break_duration)
 
     def _get_serial_timings(self):
-        transaction = self._send_command(3)
+        transaction = self._send_command(4)
         return PeekPoke.parse_get_serial_timings(transaction)
 
     def _set_serial_timings(self, timings):
-        transaction = self._send_command(4, timings.get_as_binary())
+        transaction = self._send_command(5, timings.get_as_binary())
         PeekPoke.validate_header(transaction)
 
-    def _payload_exec(self, code, response_expected=True):
-        if len(code) < 4:
-            raise ValueError("There must be at least 4 bytes of code for payload_exec.")
-        return self._send_command(5, code, response_expected)
+    def _payload_exec(self, block, response_expected=True):
+        if len(block) < 8:
+            raise ValueError("The block argument to payload_exec must have at least 8 bytes.")
+        return self._send_command(8, block, response_expected)
         
     def _send_command(self, code, data=None, response_expected=True):
         command = bytearray(b'\x70\x70\x00') + code.to_bytes(1, 'little')
@@ -204,48 +264,84 @@ class PeekPoke():
         return transaction
 
     @staticmethod
-    def validate_header(transaction):
+    def validate_header(transaction, response_name):
         rsp = transaction.response
         if len(rsp) == 0:
-            raise PeekPokeError(transaction, "The response is empty.")
+            raise PeekPokeError(transaction, "The " + response_name + " response is empty.")
         if len(rsp) < 4:
-            raise PeekPokeError(transaction, "The response has fewer than four bytes.")
+            raise PeekPokeError(transaction, "The " + response_name + " response has less than four bytes.")
         if rsp[0] != 0x70 or rsp[1] != 0x70 or rsp[2] != 0x00:
-            raise PeekPokeError(transaction, "The response identifier is incorrect.")
+            raise PeekPokeError(transaction, "The " + response_name + " response identifier is incorrect.")
         if rsp[3] != transaction.command_code:
-            raise PeekPokeError(transaction, "The response code is incorrect.")
+            raise PeekPokeError(transaction, "The " + response_name + " response code is incorrect.")
 
     @staticmethod
-    def parse_get_par(transaction):
-        PeekPoke.validate_header(transaction)
+    def validate_size(transaction, expected_size, response_name):
         rsp = transaction.response
-        if len(rsp) < 6:
-            raise PeekPokeError(transaction, "The response is less than six bytes.")
-        return int.from_bytes(rsp[4:6], 'little')
+        if len(rsp) < expected_size:
+            raise PeekPokeError(transaction, "The " + response_name + " response has less than " + str(expected_size) + " bytes.")
+        elif len(rsp) > expected_size:
+            raise PeekPokeError(transaction, "The " + response_name + " response has more than " + str(expected_size) + " bytes.")
+
+    @staticmethod
+    def validate_acknowledgement(transaction, response_name):
+        # An acknowledgement packet should have an initial header and nothing else.
+        PeekPoke.validate_header(transaction, response_name)
+        if len(transaction.response) > 4:
+            raise PeekPokeError(transaction, "The " + response_name + " acknowledgement response has more than four bytes.")
+
+    @staticmethod
+    def parse_get_info(transaction):
+        PeekPoke.validate_header(transaction, "get_info")
+        PeekPoke.validate_size(transaction, 10, "get_info")
+        rsp = transaction.response
+        info = PeekPokeInfo()
+        info.layoutID = int.from_bytes(rsp[4:8], 'little')
+        info.par = int.from_bytes(rsp[8:10], 'little')
+        return info
 
     @staticmethod
     def parse_read_hub(transaction):
-        PeekPoke.validate_header(transaction)
+        PeekPoke.validate_header(transaction, "read_hub")
+        PeekPoke.validate_size(transaction, transaction.count + 4, "read_hub")
+        return transaction.response[4:]
+
+    @staticmethod
+    def parse_read_hub_str(transaction):
+        PeekPoke.validate_header(transaction, "parse_read_hub")
         rsp = transaction.response
-        expected_size = transaction.count + 4
-        if len(rsp) < expected_size:
-            raise PeekPokeError(transaction, "The response has less data than requested.")
-        return rsp[4:expected_size]
+        expected_max_size = transaction.max_count + 4
+        if len(rsp) > expected_max_size:
+            raise PeekPokeError(transaction, "The read_hub_str response has more data than requested.")
+        elif transaction.max_count != 0 and len(rsp) == 4:
+            raise PeekPokeError(transaction, "The read_hub_str response unexpectedly did not return any bytes.")
+        return rsp[4:]
 
     @staticmethod
     def parse_get_serial_timings(transaction):
-        PeekPoke.validate_header(transaction)
-        rsp = transaction.response
-        if len(rsp) < 32:
-            raise PeekPokeError(transaction, "The response has less than 32 bytes.")
-        return SerialTimings(binary=rsp[4:32])
+        PeekPoke.validate_header(transaction, "get_serial_timings")
+        PeekPoke.validate_size(transaction, 32, "get_serial_timings")
+        return SerialTimings(binary=transaction.response[4:32])
 
+    @staticmethod
+    def parse_token_command(transaction):
+        # get_token and set_token both return an 8 byte response where the
+        #  last four bytes are a token (either current or previous value).
+        PeekPoke.validate_header(transaction, "get_token")
+        PeekPoke.validate_size(transaction, 8, "get_token")
+        return transaction.response[4:8]
 
 class PeekPokeError(ClientError):
     def __init__(self, transaction, message):
         super().__init__(transaction.address, transaction.port, message)
     def __str__(self):
         return super().extra_str()
+
+
+class PeekPokeInfo():
+    def __init__(self):
+        self.layoutID = None
+        self.par = None
 
 
 class SerialTimings():

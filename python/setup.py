@@ -1,5 +1,5 @@
 # setup.py for peekpoke
-# 25 April 2018
+# 26 April 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -50,7 +50,7 @@ version = find_version('peekpoke', '__init__.py')
 setup(
     name='peekpoke',
     version=version,
-    description='A development and debugging utility for the Parallax Propeller P8X32A.',
+    description='A development tool for the Parallax Propeller P8X32A.',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='http://siedell.com/projects/PeekPoke',
@@ -70,7 +70,6 @@ setup(
     packages=find_packages(),
     install_requires=['crow-serial'],
     python_requires='>=3',
-    data_files=[('',['LICENSE.txt'])],
 )
 
 

@@ -1,7 +1,7 @@
 {
 ==================================================
 PeekPoke.spin
-Version 0.4.1 (alpha/experimental)
+Version 0.5.0 (alpha/experimental)
 25 April 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
@@ -17,8 +17,8 @@ disabled). By default, if a break condition is detected the serial parameters wi
 be reset to their last known good values.
 
   If the payloadExec feature is enabled PeekPoke will allow the PC to execute
-arbitrary code, effectively allowing any command that can be implemented in 65
-registers (plus the static buffer).
+arbitrary code, effectively allowing any command that can be implemented in 64
+registers.
 
   By default, all features of PeekPoke except payloadExec are enabled. There are
 Spin methods that can enable and disable some features.
@@ -41,8 +41,8 @@ Some must be called in a particular sequence.
     setPort(port)
     enableWriteHub
     disableWriteHub
-    enableSetSerialParams
-    disableSetSerialParams
+    enableSetSerialTimings
+    disableSetSerialTimings
     enablePayloadExec
     disablePayloadExec
     enableBreakDetection
@@ -53,11 +53,17 @@ in order to recalculate the break multiple, regardless if the threshold has chan
 
   Calling the above methods has no effect on already launched instances.
 
-  start takes an argument that is passed to the new instance using the PAR register.
-The PC can use the getPar command to obtain its value. 
+  Launching an instance is done with one of two methods:
 
-  start will not return until the new instance is completely loaded, so calling code
-may immediately prepare to launch another instance.
+    start(par) - returns cogID + 1 (will be 0 if no cog free)
+    init(cogID, par)
+
+  The par argument will be passed to the launched instance using the PAR register.
+The PC can use the getInfo command to obtain its value. Keep in mind that PAR is a
+two-byte value where the bottom two bits are always zero.
+
+  The launching methods will not return until the new instance is completely loaded,
+so calling code may immediately prepare to launch another instance.
 
   Since this implementation uses PropCR, make sure to use PropCR byte ordering when
 sending a command.
@@ -144,12 +150,12 @@ con
     _rxByte             = $1ff  'vscl - important: it is assumed the upper bytes of this register are always zero (required for F16 calculation)
     
     { PeekPoke Permissions
-        getPar, readHub, and getSerialParams are always enabled.
+        All other commands are always enabled.
     } 
-    cEnableWriteHub         = 4
-    cEnableSetSerialParams  = 16
-    cEnablePayloadExec      = 32
-    cEnableBreakDetection   = 64
+    cEnableWriteHub         = 1
+    cEnableSetSerialTimings = 2
+    cEnablePayloadExec      = 4
+    cEnableBreakDetection   = 8
 
 
 var
@@ -197,11 +203,11 @@ pub enableWriteHub
 pub disableWriteHub
     initPermissions &= !cEnableWriteHub
 
-pub enableSetSerialParams
-    initPermissions |= cEnableSetSerialParams
+pub enableSetSerialTimings
+    initPermissions |= cEnableSetSerialTimings
 
-pub disableSetSerialParams
-    initPermissions &= !cEnableSetSerialParams    
+pub disableSetSerialTimings
+    initPermissions &= !cEnableSetSerialTimings    
 
 pub enablePayloadExec
     initPermissions |= cEnablePayloadExec
@@ -216,15 +222,18 @@ pub disableBreakDetection
     initPermissions &= !cEnableBreakDetection
 
 pub start(__par)
-    result := cognew(@Init, __par) + 1
+    result := cognew(@Entry, __par) + 1
     waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
 
+pub init(__cogid, __par)
+    coginit(__cogid, @Entry, __par)
+    waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
 
 dat
 
-{ ==========  Begin Payload Buffer and Initialization  ========== }
+{ ==========  Begin Payload Buffer, Initialization, and Entry  ========== }
 
-{ Payload and Init
+{ Payload Buffer, Initialization, and Entry
     The payload buffer is where PropCR will put received payloads. It is also where it will send
   response payloads from unless sendBufferPointer is changed.
     The payload buffer is placed at the beginning of the cog for two reasons:
@@ -234,7 +243,7 @@ dat
   will shift the permanent code into place. This prevents wasting excessive hub space with an empty buffer.
 }
 org 0
-Init
+Entry
 Payload
                                 { First, shift everything into place. Assumptions:
                                     - The actual content (not address) of the register after initEnd is initShiftStart (nothing
@@ -251,22 +260,23 @@ initShift                       mov         initShiftLimit-1, initShiftLimit-1-(
 
                                 { PeekPoke Initializations }
 
-                                { Populate the reset params. }
+                                { Populate the reset timings. }
                                 movs        _Shift, #bitPeriod0
                                 movd        _Shift, #resetBitPeriod0
                                 call        #ShiftSeven
 
                                 { Enable/Disable Features }
+
                                 test        initPermissions, #cEnableWriteHub           wc
-                        if_c    movs        _JumpWriteHub, #HubReadWrite
+                        if_c    movs        _JumpWriteHub, #_WriteHub
                         if_nc   movs        _JumpWriteHub, #ReportCommandNotAvailable
 
-                                test        initPermissions, #cEnableSetSerialParams    wc
-                        if_c    movs        _JumpSetSerialParams, #SetSerialParams
-                        if_nc   movs        _JumpSetSerialParams, #ReportCommandNotAvailable
+                                test        initPermissions, #cEnableSetSerialTimings   wc
+                        if_c    movs        _JumpSetSerialTimings, #SetSerialTimings
+                        if_nc   movs        _JumpSetSerialTimings, #ReportCommandNotAvailable
 
                                 test        initPermissions, #cEnablePayloadExec        wc
-                        if_c    movs        _JumpPayloadExec, #Payload+1
+                        if_c    movs        _JumpPayloadExec, #PayloadExec
                         if_nc   movs        _JumpPayloadExec, #ReportCommandNotAvailable
 
                                 test        initPermissions, #cEnableBreakDetection     wc
@@ -286,122 +296,35 @@ initOneInDAndSFields    long    $201    'the identical constant in the permanent
 fit 66 'On error: not enough room for init code.
 org 66
 
-
 { ==========  Begin PropCR Block  ========== }
 
 { initShiftStart is the first non-res'd register to be shifted into place. }
 initShiftStart
 
-{ Sending Addresses
-    These jumps/addresses exist for the benefit of payloadExec code. Since the SendResponse
-  jump is the first register after the payload, payloadExec code could let execution
-  go past the buffer to send a response (only if it was a full payload, since otherwise
-  the registers in between would be undefined).
-} 
-sendResponseAddr                jmp         #SendResponse                   '
-sendResponseAndResetPointerAddr jmp         #SendResponseAndResetPointer    '
-
-{ SendResponseAndReturnProxy (jmpret)
-    This routine is used by payloadExec code.
-    Usage (in payloadExec):     jmpret      AAA, #BBB
-}
-SendResponseAndReturnProxy      call        #SendResponseAndReturn          'AAA
-                                jmp         #0-0                            'BBB
-
 { Settings Notes
     The following registers store some settings. Some settings are stored in other locations (within
   instructions in some cases), and some are stored in multiple locations.
 }
-bitPeriod0              long    cBitPeriod0                                 ' - MUST be at even addressed register
-bitPeriod1              long    cBitPeriod1                                 ' - MUST immeidately follow bitPeriod1
-startBitWait            long    cStartBitWait                               '
-stopBitDuration         long    cStopBitDuration                            '
-timeout                 long    cTimeout                                    '
-recoveryTime            long    cRecoveryTime                               '
-breakMultiple           long    cBreakMultiple                              '
-rxMask                  long    |< cRxPin                                   ' - rx pin also stored in rcvyLowCounterMode
-txMask                  long    |< cTxPin                                   '
+bitPeriod0              long    cBitPeriod0                                 'MUST be at even addressed register
+bitPeriod1              long    cBitPeriod1                                 'MUST immeidately follow bitPeriod1
+startBitWait            long    cStartBitWait
+stopBitDuration         long    cStopBitDuration
+timeout                 long    cTimeout
+recoveryTime            long    cRecoveryTime
+breakMultiple           long    cBreakMultiple
+rxMask                  long    |< cRxPin                                   'rx pin also stored in rcvyLowCounterMode
+txMask                  long    |< cTxPin
 
-kOneInDField            long    $200                                        '
-kOneInDAndSFields       long    $201                                        '
-k7070                   long    $7070                                       '
-kFF00_0000              long    $ff00_0000                                  '
-kFFFF                   long    $ffff                                       '
+layoutID                long    $a0b1_c2d3                                  'todo: change when layout finalized
+ppToken                 long    0
 
-{ ShiftSeven (call)
-    This helper routine shifts seven cog registers. It is used to support the serial params commands.
-} 
-ShiftSeven                      mov         ind, #7                         '
-_Shift                          mov         0-0, 0-0                        '
-                                add         _Shift, kOneInDAndSFields       '
-                                djnz        ind, #_Shift                    '
-ShiftSeven_ret                  ret                                         '
+kFFFF                   long    $ffff
+kOneInDField            long    $200
+kOneInDAndSFields       long    $201
+k7070                   long    $7070
+kFF00_0000              long    $ff00_0000
 
-{ PeekPokeJumpTable
-    This is used after the command has been determined in UserCode. It is placed here
-  to give payloadExec code easier access to these routines, should that be necessary.
-}
-PeekPokeJumpTable               jmp         #HubReadWrite                   ' - command 1, readHub; note: getPar (0) isn't in table
-_JumpWriteHub                   jmp         #HubReadWrite                   ' - command 2, writeHub; set s-field to ReportCommandNotAvailable to disable; see note above
-                                jmp         #GetSerialParams                ' - command 3, getSerialParams
-_JumpSetSerialParams            jmp         #SetSerialParams                ' - command 4, setSerialParams; set s-field to ReportCommandNotAvailable to disable
-_JumpPayloadExec                jmp         #ReportCommandNotAvailable      ' - command 5, payloadExec; set s-field to ReportCommandNotAvailable to disable
-                                { commands 6+ are not available, so next
-                                    instruction must be the start of
-                                    ReportCommandNotAvailable }
-{ Error Reporting Routines }
-ReportCommandNotAvailable       mov         Payload, #cCommandNotAvailable  '
-                                jmp         #SendCrowError                  '
-ReportIncorrectSize             mov         Payload, #cIncorrectCommandSize '
-                                jmp         #SendCrowError                  '
-ReportRequestTooLarge           mov         Payload, #cRequestTooLarge      '
-                                jmp         #SendCrowError                  '
 
-{ PacketReceived (call)
-    This routine is called from ReceiveCommandFinish after determining that a valid packet has been
-  received (but before doing anything with the command). By default it saves the reset serial params.
-    This handler is called before verifying the address. The packet may also have been oversized, so
-  its payload was not saved. This handler is just for reacting to the fact that a valid packet has
-  been received, so the serial timings may be assumed to be good.
-    The initial jmp provides a hook for extending the handler. For example, it can be used to
-  disable a clock mode reversion in the break handler.
-    Anticipated usage to extend the handler:
-        to set up hook:         movs    AAAA, #<address of code, probably in StaticBuffer, to execute>
-        in extended handler:    <extended code to handle event>
-                                jmp     #BBBB 'to save reset serial params
-                                -or-
-                                jmp     CCCC 'to bypass saving reset serial params                                  
-}
-PacketReceived                  jmp         #$+1                            'AAAA - hook for extending this handler
-                                movd        _Shift, #resetBitPeriod0        'BBBB
-                                movs        _Shift, #bitPeriod0             '
-                                call        #ShiftSeven                     '
-PacketReceived_ret              ret                                         'CCCC
-
-{ BreakHandler 
-    The default behavior when a break is detected is to reset the serial timings to the last known
-  good values.
-    This handler is located just before StaticBuffer so that it can be more easily modified
-  by payloadExec code.
-    This code is executed immediately after the break is detected, while it may still be ongoing.
-}
-BreakHandler                    movd        _Shift, #bitPeriod0             '
-                                movs        _Shift, #resetBitPeriod0        '
-                                call        #ShiftSeven                     '
-
-                                waitpeq     rxMask, rxMask                  ' - wait for break to end
-
-                                jmp         #ReceiveCommand                 '
-
-{ StaticBuffer
-    This buffer is available for payloadExec's use. It can be used to store state between
-  commands.
-    It it placed immediately after BreakHandler so that it can also be used to extend the
-  break handler (e.g. so that a break might reset a clock mode change).
-    Being immediately before ReceiveCommand allows execution to go there without a jump, if
-  space is very tight.
-}
-StaticBuffer            long    0[18]                                       '
 
 { ReceiveCommand (jmp)
     This routine waits for a command and then processes it in ReceiveCommandFinish. It makes use
@@ -523,10 +446,25 @@ _RcvyLoopTop                    waitcnt     _rcvyWait, recoveryTime
                                 cmp         _rcvyTmp, _rcvyCurrPhsb         wz      'z=0 line high at some point during interval, or this is first pass through loop
                         if_nz   mov         _rcvyCountdown, breakMultiple           'reset break detection countdown if line not continuously low
                                 mov         _rcvyPrevPhsb, _rcvyCurrPhsb
-_RcvyLoopJump                   djnz        _rcvyCountdown, #_RcvyLoopTop           'break is detected when _rcvyCountdown reaches zero
+_RcvyLoopJump                   djnz        _rcvyCountdown, #_RcvyLoopTop           'break detected when countdown reaches zero; init code changes to jmp to disable breaks
 
                                 mov         ctrb, #0                                'turn off counter B module
-                                jmp         #BreakHandler
+
+                        { fall through to BreakHandler }
+
+{ BreakHandler 
+    The default behavior when a break is detected is to reset the serial timings to the last known
+  good values.
+    This code is executed immediately after the break is detected, while it may still be ongoing.
+}
+BreakHandler                
+                                movd        _Shift, #bitPeriod0
+                                movs        _Shift, #resetBitPeriod0
+                                call        #ShiftSeven
+
+                                waitpeq     rxMask, rxMask                          'wait for break to end
+
+                                jmp         #ReceiveCommand
 
 
 { RX Parsing Instructions, used by ReceiveCommand
@@ -624,8 +562,11 @@ _RxStoreLeftovers       if_nz   mov         0-0, _rxLeftovers
                                 { At this point a valid packet has been received. It may not be addressed
                                     to this device, and it may be oversized (so its payload was not saved). }
 
-                                { PeekPoke: call the PacketReceived handler. }
-                                call        #PacketReceived
+                                { PeekPoke: a valid packet was received, so save the current serial timings as the 
+                                    last known good timings. }
+                                movd        _Shift, #resetBitPeriod0
+                                movs        _Shift, #bitPeriod0
+                                call        #ShiftSeven
 
                                 { Check the address if not broadcast. }
 _RxCheckAddress         if_nz   cmp         _rxTmp_SH, #cAddress            wz      'z=0 addresses don't match; address (s-field) may be set before launch
@@ -968,23 +909,18 @@ UserCode
 
                                 { Extract the command code and jump to the routine. }
                                 mov         command, Payload
-                                shr         command, #24                wz      'z=1 command code is getPar (bypass the jump table)
-                        if_nz   max         command, #6
-                        if_nz   add         command, #PeekPokeJumpTable-1       'using minus one since getPar isn't in the table
+                                shr         command, #24                wz      'z=1 code = 0 (getInfo)
+                        if_z    jmp         #GetInfo
+                                testn       command, #%11               wz      'z=1 code = 1, 2, or 3 (hub memory commands); using fall-through
+                        if_nz   max         command, #9                         '9+ will result in CommandNotAvailable error
+                        if_nz   add         command, #JumpTable-4               'jump table starts at command code 4
                         if_nz   jmp         command
 
-                            { fall through to GetPar }
+                        { fall through to HubMemoryCommand (z=1) }
 
-{ getPar }
-GetPar                          mov         Payload+1, par
-                                mov         payloadSize, #6
-                                jmp         #SendResponse
-
-
-{ readHub, writeHub }
-HubReadWrite                    { Both readHub and writeHub have address and count (numBytes) arguments. }
+HubMemoryCommand                { All hub memory commands have address and count (numBytes) arguments. }
                                 cmp         payloadSize, #8             wc
-                        if_c    jmp         #ReportIncorrectSize
+                        if_c    jmp         #ReportInvalidCommand
                                 mov         address, Payload+1
                                 and         address, kFFFF
                                 mov         numBytes, Payload+1
@@ -997,34 +933,55 @@ HubReadWrite                    { Both readHub and writeHub have address and cou
                                 shr         numLongs, #2
                         if_nz   add         numLongs, #1
 
-                                cmp         command, #_JumpWriteHub     wz
-                        if_z    jmp         #_WriteHub
+                                shr         command, #1                 wz, wc  'c=0 writeHub (2), c=1 readHub (1, so z=1) or readHubStr (3, so z=0) 
+_JumpWriteHub           if_nc   jmp         #0-0                                'initializing code sets to _WriteHub or ReportCommandNotAvailable
 
-_ReadHub                        { readHub will require 4 + count bytes in the response payload. Note: count may be zero. }
-                                mov         payloadSize, numBytes       wz      'z=1 count is zero
-                                add         payloadSize, #4
-                                cmp         maxPayloadSize, payloadSize wc      'c=1 response would exceed payload buffer
-                        if_c    jmp         #ReportRequestTooLarge
+                        { fall through to _ReadHub, where z indicates the specific command }
 
-                        if_nz   movd        :setLong, #Payload+1
-:outerLoop              if_nz   mov         ind, #4
-                        if_nz   mov         y, #0
-:innerLoop              if_nz   rdbyte      x, address
-                        if_nz   add         address, #1
-                        if_nz   or          y, x
-                        if_nz   ror         y, #8
-                        if_nz   djnz        ind, #:innerLoop
-:setLong                if_nz   mov         0-0, y
-                        if_nz   add         :setLong, kOneInDField
-                        if_nz   djnz        numLongs, #:outerLoop
+{ readHub, readHubStr }
+_ReadHub                        { readHub and readHubStr can request up to 260 bytes of data (4 bytes for initial header). }
+                                cmp         numBytes, #261              wc      'c=0 request too large
+                        if_nc   jmp         #ReportInvalidCommand
+
+                        if_z    movs        :nulJump, #:innerJump               'z=1 readHub, so keep going after NUL found
+                        if_nz   movs        :nulJump, #SendResponse             'z=0 readHubStr, so stop after NUL found
+
+                                movd        :clearLong, #Payload+1
+                                movd        :packByte, #Payload+1
+                                mov         payloadSize, #4
+
+:outerLoop                      mov         ind, numBytes               wz      'z=1 no bytes left to write
+                        if_z    jmp         #SendResponse
+                                max         ind, #4
+                                sub         numBytes, ind
+
+                                mov         offset, #0
+
+:clearLong                      mov         0-0, #0
+                                add         :clearLong, kOneInDField
+
+:innerLoop                      rdbyte      x, address                  wz      'z=1 NUL byte
+                                add         address, #1
+                                shl         x, offset
+                                add         offset, #8
+:packByte                       or          0-0, x
+                                add         payloadSize, #1
+:nulJump                if_z    jmp         #0-0
+:innerJump                      djnz        ind, #:innerLoop
+
+                                add         :packByte, kOneInDField
+
+                                djnz        numLongs, #:outerLoop
 
                                 jmp         #SendResponse
 
-_WriteHub                       { writeHub should have 8 + count bytes in the payload. Note: count may be zero. }
+
+{ writeHub }
+_writeHub                       { writeHub should have 8 + count bytes in the payload. Note: count may be zero. }
                                 mov         scratch, #8
                                 add         scratch, numBytes
                                 cmp         payloadSize, scratch        wz
-                        if_nz   jmp         #ReportIncorrectSize
+                        if_nz   jmp         #ReportInvalidCommand
 
                                 movs        :getLong, #Payload+2
 :outerLoop                      mov         ind, #4
@@ -1042,20 +999,24 @@ _WriteHub                       { writeHub should have 8 + count bytes in the pa
                                 jmp         #SendResponse
 
 
-{ getSerialParams }
-GetSerialParams
-                                movd        _Shift, #Payload+1
+{ getInfo }
+GetInfo                         mov         Payload+1, layoutID
+                                mov         Payload+2, par
+                                mov         payloadSize, #10
+                                jmp         #SendResponse
+
+
+{ getSerialTimings }
+GetSerialTimings                movd        _Shift, #Payload+1
                                 movs        _Shift, #bitPeriod0
                                 call        #ShiftSeven
-
                                 mov         payloadSize, #32
                                 jmp         #SendResponse
 
 
-{ setSerialParams }
-SetSerialParams
-                                cmp         payloadSize, #32            wz
-                        if_nz   jmp         #ReportIncorrectSize
+{ setSerialTimings }
+SetSerialTimings                cmp         payloadSize, #32            wz
+                        if_nz   jmp         #ReportInvalidCommand
 
                                 mov         payloadSize, #4
                                 call        #SendResponseAndReturn              'setting occurs after acknowledgement
@@ -1066,6 +1027,69 @@ SetSerialParams
 
                                 jmp         #ReceiveCommand
 
+{ getToken }
+GetToken                        mov         Payload+1, ppToken
+                                mov         payloadSize, #8
+                                jmp         #SendResponse
+
+
+{ Note: a register could be freed by setting scratch=ppToken before the jump table
+    and then folding GetToken into SetToken. }
+
+
+{ setToken }
+SetToken                        cmp         payloadSize, #8             wz
+                        if_nz   jmp         #ReportInvalidCommand
+
+                                mov         scratch, Payload+1
+                                mov         Payload+1, ppToken
+                                mov         ppToken, scratch
+
+                                jmp         #SendResponse
+                                
+
+{ payloadExec }
+PayloadExec                     cmp         payloadSize, #12            wc      'c=1 payload too short
+                                cmp         Payload+1, layoutID         wz      'z=0 wrong layoutID
+                    if_c_or_nz  jmp         #ReportInvalidCommand
+                                jmp         #Payload+2
+
+
+{ JumpTable
+    The jump table starts at command code 4.
+    There is an implicit entry at code 9, which is not available, so the register immediately
+  after the jump table must be the start of ReportCommandNotAvailable.
+}
+JumpTable                       jmp         #GetSerialTimings                   '4
+_JumpSetSerialTimings           jmp         #0-0                                '5 - initializing code sets to SetSerialTimings or ReportCommandNotAvailable
+                                jmp         #GetToken                           '6
+                                jmp         #SetToken                           '7
+_JumpPayloadExec                jmp         #0-0                                '8 - initializing code sets to PayloadExec or ReportCommandNotAvailable
+                                
+                        { 9+ not available, so next register must be start of ReportCommandNotAvailable }
+
+{ ReportCommandNotAvailable (jmp)
+}
+ReportCommandNotAvailable       mov         Payload, #cCommandNotAvailable
+                                jmp         #SendCrowError
+
+
+{ ReportInvalidCommand (jmp)
+    The catch-all error for invalid commands (wrong size, request too large).
+}
+ReportInvalidCommand            mov         Payload, #cInvalidCommand
+                                jmp         #SendCrowError
+
+
+{ ShiftSeven (call)
+    This helper routine shifts seven cog registers. It is used to support the serial timings commands.
+} 
+ShiftSeven                      mov         ind, #7
+_Shift                          mov         0-0, 0-0
+                                add         _Shift, kOneInDAndSFields
+                                djnz        ind, #_Shift
+ShiftSeven_ret                  ret
+
 
 { ==========  Begin Res'd Variables and Temporaries ========== }
 
@@ -1073,8 +1097,8 @@ fit 478 'On error: must reduce user code, payload buffer, or admin code.
 org 478
 initShiftLimit          'The initialization shifting code will ignore registers at and above this address.
 
-{ Reset Serial Params
-    These store the last known good serial params. They are set in PacketReceived.
+{ Reset Serial Timings
+    These store the last known good serial timings. They are set in PacketReceived.
 }
 resetBitPeriod0                 res     '478
 resetBitPeriod1                 res     '479    
@@ -1117,6 +1141,7 @@ ind
 tmp3
 _rxOffset       res     '489
 
+offset
 tmp4
 _rxNextAddr     res     '490
 

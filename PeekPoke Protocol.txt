@@ -1,6 +1,6 @@
 ======================================
 PeekPoke Protocol.txt
-25 April 2018
+26 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
 ======================================
@@ -9,7 +9,8 @@ PeekPoke is a tool for reading and writing the hub RAM of a Parallax Propeller
 P8X32A microcontroller from a computer. PeekPoke also has additional features:
     - getting the PAR register of the launched instance,
     - getting and setting the serial timings,
-    - resetting the serial timings with a break condition, and
+    - resetting the serial timings with a break condition,
+    - getting and setting a cog-based token for session management, and
     - executing arbitrary code sent by the PC.
 
 Some of these features may be disabled.
@@ -46,25 +47,29 @@ Errors are reported using Crow-level error responses.
 All multibyte values are in little-endian order.
 
 These are the command codes:
-    0 - getPar
+    0 - getInfo
     1 - readHub
     2 - writeHub
-    3 - getSerialTimings
-    4 - setSerialTimings
-    5 - payloadExec
+    3 - readHubStr
+    4 - getSerialTimings
+    5 - setSerialTimings
+    6 - getToken
+    7 - setToken
+    8 - payloadExec
  
 
-getPar
-======
+getInfo
+=======
 
 Command payload, 4 bytes:
         pos     len     description
         0       4       initial header
 
-Response payload, 6 bytes:
+Response payload, 10 bytes:
         pos     len     description
         0       4       initial header
-        4       2       par
+        4       4       implementation's layoutID (for payloadExec)
+        8       2       par
 
 
 readHub
@@ -99,6 +104,23 @@ Response payload, 4 bytes:
 A single write command can be considered atomic since the data is included in
 a packet that is fully received into a buffer and checked for errors before
 performing the command.
+
+
+readHubStr
+==========
+
+Command payload, 8 bytes:
+        pos     len     description
+        0       4       initial header
+        4       2       address of read start, any alignment
+        6       2       max count M, including terminating NUL, may be zero
+
+Response payload, 4 to 4+count bytes:
+        pos     len     description
+        0       4       initial header
+        4+      <= M    the string, including terminating NUL (if found)
+
+readHubStr is like readHub, except it stops after the first 0x00 is found.
 
 
 getSerialTimings
@@ -145,13 +167,44 @@ Response payload, 4 bytes:
 Changes take effect after the acknowledgement response is sent.
 
 
+getToken
+========
+
+Command payload, 4 bytes:
+        pos     len     description
+        0       4       initial header
+
+Response payload, 8 bytes:
+        pos     len     description
+        0       4       initial header
+        4       4       token
+
+token is a 4-byte value that is all zeroes on launch. It does not change
+except when setToken is called.
+
+
+setToken
+========
+
+Command payload, 8 bytes:
+        pos     len     description
+        0       4       initial header
+        4       4       new token
+
+Response payload, 8 bytes:
+        pos     len     description
+        0       4       initial header
+        4       4       old token
+
+
 payloadExec
 ===========
 
-Command payload, 8+ bytes:
+Command payload, 12+ bytes:
         pos     len     description
         0       4       initial header
-        4+      -       PASM code
+        4       4       layoutID
+        8+      -       PASM code
 
 Response payload, 4+ bytes (if sent):
         pos     len     description
@@ -159,12 +212,11 @@ Response payload, 4+ bytes (if sent):
         4+      -       data
 
 The payloadExec option requires a pre-arranged cog layout in order to work.
+The layoutID argument identifies what layout the payload code expects. Only if
+the payload's expected layout matches the implementation's will the payload
+code be executed.
 
-The PropCR-BD based implementation places the code starting at register 1,
-and it may extend up through register 65 (so there can be up to 260 bytes of
-instructions and data in the command). Execution will start at register 1. The
-payload code must prepare its own response and call the sending routines when
-done.
+Execution starts at the beginning of the PASM code block.
 
 If a response is returned it must begin with the standard initial header.
 
