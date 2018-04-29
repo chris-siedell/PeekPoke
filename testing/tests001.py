@@ -1,5 +1,5 @@
 # tests001.py
-# 28 April 2018
+# 29 April 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -12,7 +12,8 @@
 
 import sys
 import time
-import peekpoke
+import random
+from peekpoke import PeekPoke
 from crow.admin import CrowAdmin
 
 
@@ -22,30 +23,32 @@ if len(sys.argv) < 2:
 serial_port_name = sys.argv[1]
 
 REF_CLKFREQ = 80000000
+INIT_BAUD = 115200
+LOWER_BAUD = 57600
 
 start_time = time.perf_counter()
 
-p = peekpoke.PeekPoke(serial_port_name)
+p = PeekPoke(serial_port_name)
 
 print("PeekPoke Tests 001")
 print(" Serial port: " + serial_port_name)
 print(" Assumptions:")
+print("  - it is safe to send a break condition,")
 print("  - setup001.spin is running,")
 print("  - the reference values have not been overwritten,")
 print("  - all features besides payloadExec are enabled,")
-print("  - it is safe to send a break condition,")
 print("  - the PeekPoke service is at address " + str(p.address) + " and port " + str(p.port) + ",")
-print("  - the Propeller and the PC can communicate at 115200 and 57600 bps,")
+print("  - the Propeller and the PC can communicate at " + str(INIT_BAUD) + " and " + str(LOWER_BAUD) + " bps,")
 print("  - the Propeller's clock frequency is " + str(REF_CLKFREQ) + " Hz.")
 print(" These tests do not overwrite the reference values.")
-print(" Testing should take about 000000 seconds.")
+print(" Testing should take about 14 seconds.")
 print(" ...")
 
 
 # === Service Check ===
 
 # Verify that a Crow device exists at the given serial port and address,
-#  and that it is running a PeekPoke service on the expected port.
+#  and that it is running a PeekPoke service on the expected Crow port.
 admin = CrowAdmin(serial_port_name, default_address=p.address)
 admin.ping()
 info = admin.get_port_info(p.port)
@@ -67,7 +70,9 @@ k = p.get_token()
 if k != 0:
     raise RuntimeError("Please reboot or reload the Propeller so that a fresh instance of setup001.spin is running.")
 
-p.set_token_bytes(b'\xa0\xb1\xc2\xd3')
+v = p.set_token_bytes(b'\xa0\xb1\xc2\xd3')
+if v != b'\x00\x00\x00\x00':
+    raise RuntimeError()
 v = p.get_token()
 if v != 3552752032:
     raise RuntimeError()
@@ -75,17 +80,23 @@ v = p.get_token(byteorder='big')
 if v != 2696004307:
     raise RuntimeError()
 
-p.set_token_bytes(b'\xff\xff', use_padding=True)
+v = p.set_token_bytes(b'\xff\xff', use_padding=True)
+if v != b'\xa0\xb1\xc2\xd3':
+    raise RuntimeError()
 v = p.get_token()
 if v != 65535:
     raise RuntimeError()
 
-p.set_token(305419896, byteorder='big')
+v = p.set_token(305419896, byteorder='big')
+if v != 4294901760:
+    raise RuntimeError()
 v = p.get_token_bytes()
 if v != b'\x12\x34\x56\x78':
     raise RuntimeError()
 
-p.set_token(-1, signed=True)
+v= p.set_token(-1, signed=True)
+if v != 2018915346:
+    raise RuntimeError()
 v = p.get_token(signed=True)
 if v != -1:
     raise RuntimeError()
@@ -111,7 +122,9 @@ v = p.get_token()
 if v != 4294967295:
     raise RuntimeError()
 
-p.set_token(0)
+v = p.set_token(0)
+if v != 4294967295:
+    raise RuntimeError()
 v = p.get_token()
 if v != 0:
     raise RuntimeError()
@@ -307,28 +320,30 @@ if v != []:
 
 v = p.get_int(0, 4)
 if v != REF_CLKFREQ:
-    print("WARNING: REF_CLKFREQ (" + str(REF_CLKFREQ) + ") does not have the same value as the first long of hub memory (" + str(v) + "). This will probably lead to problems.")
+    print("WARNING: REF_CLKFREQ (" + str(REF_CLKFREQ) + ") does not have the same value as the first long of hub memory (" + str(v) + "). This will probably cause problems.")
 
 # Use estimated clkfreq.
-p.switch_baudrate(57600)
+# This effectively tests estimate_clkfreq.
+p.switch_baudrate(LOWER_BAUD)
 verify_table_str(11, gettysburg)
 
-# Spin's clkfreq (LONG[0]).
-p.switch_baudrate(115200, use_hub_clkfreq=True)
+# Use Spin's clkfreq (LONG[0]).
+p.switch_baudrate(INIT_BAUD, use_hub_clkfreq=True)
 verify_table_str(11, gettysburg)
 
-# Explicit clkfreq.
-p.switch_baudrate(57600, clkfreq=REF_CLKFREQ)
+# Use explicit clkfreq.
+p.switch_baudrate(LOWER_BAUD, clkfreq=REF_CLKFREQ)
 verify_table_str(11, gettysburg)
 
 # Baudrate reversion -- this sends a break condition.
-p.switch_baudrate(115200)
+p.switch_baudrate(INIT_BAUD)
 p.revert_baudrate()
-if p.baudrate != 57600:
+if p.baudrate != LOWER_BAUD:
     raise RuntimeError()
-verify_table_str(4, "cat")
+verify_table_str(11, gettysburg)
 
-p.switch_baudrate(115200, clkfreq=REF_CLKFREQ)
+p.switch_baudrate(INIT_BAUD, clkfreq=REF_CLKFREQ)
+verify_table_str(11, gettysburg)
 
 
 # === Fill Tests ===
@@ -419,7 +434,7 @@ if v != "catrary":
 
 # This helper clears NULs that may complicate some tests.
 def write_dashes():
-    filler_str = "----------------"
+    filler_str = "-------------------"
     p.set_str(buff_addr, buff_size, filler_str)
     v = p.get_str(buff_addr, buff_size)
     if v != filler_str:
@@ -485,14 +500,305 @@ if v != "Ⓑ":
 
 # === Integer Writing Tests ===
 
+p.set_int(buff_addr, 1, 255)
+p.set_int(buff_addr+1, 1, 128)
+p.set_int(buff_addr+2, 1, 0)
+v = p.get_ints(buff_addr, 1, 3)
+if v != [255, 128, 0]:
+    raise RuntimeError()
+
+p.set_int(buff_addr+1, 1, -1, signed=True)
+p.set_int(buff_addr+2, 1, -128, signed=True)
+p.set_int(buff_addr+3, 1, 127, signed=True)
+v = p.get_ints(buff_addr+1, 1, 3, signed=True)
+if v != [-1, -128, 127]:
+    raise RuntimeError()
+
+p.set_int(buff_addr, 2, 0xffff)
+p.set_int(buff_addr+2, 2, 0x8000)
+p.set_int(buff_addr+4, 2, 0)
+v = p.get_ints(buff_addr, 2, 3)
+if v != [65535, 32768, 0]:
+    raise RuntimeError()
+
+try:
+    p.set_int(buff_addr+1, 2, -1, signed=True)
+    raise RuntimeError()
+except ValueError:
+    pass
+p.set_int(buff_addr+1, 2, -1, signed=True, alignment='byte')
+p.set_int(buff_addr+3, 2, -32768, signed=True, alignment='byte')
+p.set_int(buff_addr+5, 2, 32767, signed=True, alignment='byte')
+v = p.get_ints(buff_addr+1, 2, 3, signed=True, alignment='byte')
+if v != [-1, -32768, 32767]:
+    raise RuntimeError()
+
+p.set_int(buff_addr, 2, 0xabcd, byteorder='big')
+v = p.get_int(buff_addr, 2, byteorder='big')
+if v != 0xabcd:
+    raise RuntimeError()
+v = p.get_int(buff_addr, 2)
+if v != 0xcdab:
+    raise RuntimeError()
+
+p.set_int(buff_addr, 4, 0xffffffff)
+p.set_int(buff_addr+4, 4, 0x80000000)
+p.set_int(buff_addr+8, 4, 1)
+v = p.get_ints(buff_addr, 4, 3)
+if v != [4294967295, 2147483648, 1]:
+    raise RuntimeError()
+
+p.set_int(buff_addr, 4, -1, signed=True)
+p.set_int(buff_addr+4, 4, 2147483647, signed=True)
+p.set_int(buff_addr+8, 4, -2147483648, signed=True)
+v = p.get_ints(buff_addr, 4, 3, signed=True)
+if v != [-1, 2147483647, -2147483648]:
+    raise RuntimeError()
+
+try:
+    p.set_int(buff_addr+1, 4, 0xaabbccdd)
+    raise RuntimeError()
+except ValueError:
+    pass
+p.set_int(buff_addr+1, 4, 0xaabbccdd, alignment='byte')
+v = p.get_int(buff_addr+1, 4, alignment='byte')
+if v != 0xaabbccdd:
+    raise RuntimeError()
+
+try:
+    p.set_int(buff_addr+2, 4, 0x11223344)
+    raise RuntimeError()
+except ValueError:
+    pass
+p.set_int(buff_addr+2, 4, 0x11223344, alignment='word')
+v = p.get_int(buff_addr+2, 4, alignment='word')
+if v != 0x11223344:
+    raise RuntimeError()
+
+p.set_int(buff_addr, 4, 0x24681357, byteorder='big')
+v = p.get_int(buff_addr, 4, byteorder='big')
+if v != 0x24681357:
+    raise RuntimeError()
+v = p.get_int(buff_addr, 4)
+if v != 0x57136824:
+    raise RuntimeError()
+
+u = [0, 127, 128, 255]
+p.set_ints(buff_addr, 1, u)
+v = p.get_ints(buff_addr, 1, len(u))
+if v != u:
+    raise RuntimeError()
+
+u = [1, -1, 0, 127, -128]
+p.set_ints(buff_addr, 1, u, signed=True)
+v = p.get_ints(buff_addr, 1, len(u), signed=True)
+if v != u:
+    raise RuntimeError()
+
+u = [0, 32768, 45000, 65535]
+p.set_ints(buff_addr, 2, u)
+v = p.get_ints(buff_addr, 2, len(u))
+if v != u:
+    raise RuntimeError()
+
+u = [-1, -32768, 32767, 0, 1]
+try:
+    p.set_ints(buff_addr+1, 2, u, signed=True)
+    raise RuntimeError()
+except ValueError:
+    pass
+p.set_ints(buff_addr+1, 2, u, signed=True, alignment='byte')
+v = p.get_ints(buff_addr+1, 2, len(u), signed=True, alignment='byte')
+if v != u:
+    raise RuntimeError()
+
+u = [4294967295, 2147483648, 1, 0]
+p.set_ints(buff_addr, 4, u)
+v = p.get_ints(buff_addr, 4, len(u))
+if v != u:
+    raise RuntimeError()
+
+u = [-2147483648, 2147483647, -1, 1, 0]
+p.set_ints(buff_addr, 4, u, signed=True)
+v = p.get_ints(buff_addr, 4, len(u), signed=True)
+if v != u:
+    raise RuntimeError()
+
+u = [3000000000, 40, 27000000, 2]
+try:
+    p.set_ints(buff_addr+1, 4, u)
+    raise RuntimeError()
+except ValueError:
+    pass
+p.set_ints(buff_addr+1, 4, u, alignment='byte')
+v = p.get_ints(buff_addr+1, 4, len(u), alignment='byte')
+if v != u:
+    raise RuntimeError()
+
+u = [-2000000000, 1000, 2000000000, 2]
+try:
+    p.set_ints(buff_addr+2, 4, u, signed=True)
+    raise RuntimeError()
+except ValueError:
+    pass
+try:
+    p.set_ints(buff_addr+3, 4, u, signed=True, alignment='word')
+    raise RuntimeError()
+except ValueError:
+    pass
+p.set_ints(buff_addr+2, 4, u, signed=True, alignment='word')
+v = p.get_ints(buff_addr+2, 4, len(u), signed=True, alignment='word')
+if v != u:
+    raise RuntimeError()
+
+def fill_area(size, byte):
+    u = bytearray(size)
+    for i in range(0, size):
+        u[i] = byte
+    p.fill_bytes(buff_addr, size, byte.to_bytes(1, 'little'))
+    v = p.get_bytes(buff_addr, size)
+    if v != u:
+        raise RuntimeError()
+    return u
+
+u = fill_area(10, 0x55)
+u[0] = 0x15
+p.set_int(buff_addr, 1, 0x15)
+v = p.get_bytes(buff_addr, 10)
+if v != u:
+    raise RuntimeError()
+
+u = fill_area(10, 0xaa)
+u[0] = 0x90
+u[1] = 0x40
+p.set_int(buff_addr, 2, 0x4090)
+v = p.get_bytes(buff_addr, 10)
+if v != u:
+    raise RuntimeError()
+
+u = fill_area(10, 0x55)
+u[3] = 0x10
+u[4] = 0x20
+u[5] = 0x30
+u[6] = 0x40
+p.set_int(buff_addr+3, 4, 0x40302010, alignment='byte')
+v = p.get_bytes(buff_addr, 10)
+if v != u:
+    raise RuntimeError()
+
+u = fill_area(10, 0xaa)
+u[0] = 230
+p.set_ints(buff_addr, 1, [230])
+v = p.get_bytes(buff_addr, 10)
+if v != u:
+    raise RuntimeError()
+
+u = fill_area(10, 0x55)
+u[1] = 0xcc
+u[2] = 0xdd
+p.set_ints(buff_addr+1, 2, [0xccdd], byteorder='big', alignment='byte')
+v = p.get_bytes(buff_addr, 10)
+if v != u:
+    raise RuntimeError()
+
+u = fill_area(10, 0xaa)
+u[2] = 0x40
+u[3] = 0x30
+u[4] = 0x20
+u[5] = 0x10
+p.set_ints(buff_addr+2, 4, [0x10203040], alignment='word')
+v = p.get_bytes(buff_addr, 10)
+if v != u:
+    raise RuntimeError()
+
+u = fill_area(10, 0x55)
+p.set_ints(buff_addr, 1, [])
+p.set_ints(buff_addr+2, 2, [])
+p.set_ints(buff_addr+4, 4, [])
+v = p.get_bytes(buff_addr, 10)
+if v != u:
+    raise RuntimeError()
 
 
-# === Binary Data Reading Tests ===
+# === Binary Data Tests ===
 
+def random_bytes(size):
+    u = bytearray(size)
+    for i in range(0, size):
+        u[i] = random.randint(0, 255)
+    return u
 
+u = bytearray(buff_size)
+p.set_bytes(buff_addr, u)
+v = p.get_bytes(buff_addr, buff_size)
+if v != u:
+    raise RuntimeError()
 
-# === Binary Data Writing Tests ===
+p.set_bytes(buff_addr, b'\xab')
+p.set_bytes(buff_addr+1, b'\xcd\xef\x01\x23')
+p.set_bytes(buff_addr, b'')
+v = p.get_bytes(buff_addr, 10)
+if v != b'\xab\xcd\xef\x01\x23\x00\x00\x00\x00\x00':
+    raise RuntimeError()
 
+r = random_bytes(100)
+u = bytearray(50) + r + bytearray(50)
+p.set_bytes(buff_addr+200, r)
+v = p.get_bytes(buff_addr+150, 200)
+if v != u:
+    raise RuntimeError()
+
+u = random_bytes(PeekPoke.MAX_ATOMIC_WRITE)
+p.set_bytes(buff_addr, u, atomic=True)
+v = p.get_bytes(buff_addr, len(u), atomic=True)
+if v != u:
+    raise RuntimeError()
+
+u = random_bytes(PeekPoke.MAX_ATOMIC_WRITE+1)
+try:
+    p.set_bytes(buff_addr, u, atomic=True)
+    raise RuntimeError()
+except ValueError:
+    # expected since the size exceeds the max atomic write limit
+    pass
+p.set_bytes(buff_addr, u)
+# The max atomic read is greater than the max write.
+v = p.get_bytes(buff_addr, len(u), atomic=True)
+if v != u:
+    raise RuntimeError()
+
+u = random_bytes(PeekPoke.MAX_ATOMIC_READ)
+p.set_bytes(buff_addr, u)
+v = p.get_bytes(buff_addr, len(u), atomic=True)
+if v != u:
+    raise RuntimeError()
+
+u = random_bytes(PeekPoke.MAX_ATOMIC_READ+1)
+p.set_bytes(buff_addr, u)
+try:
+    v = p.get_bytes(buff_addr, len(u), atomic=True)
+    raise RuntimeError()
+except ValueError:
+    # expected since the size exceeds the max atomic read limit
+    pass
+v = p.get_bytes(buff_addr, len(u))
+if v != u:
+    raise RuntimeError()
+
+h = buff_size // 2
+r = random_bytes(h)
+u = r + bytearray(buff_size - h)
+p.set_bytes(buff_addr, u)
+v = p.get_bytes(buff_addr, buff_size)
+if v != u:
+    raise RuntimeError()
+
+r2 = random_bytes(buff_size - h)
+u = r + r2
+p.set_bytes(buff_addr, u)
+v = p.get_bytes(buff_addr, buff_size)
+if v != u:
+    raise RuntimeError()
 
 
 # === All Done ===

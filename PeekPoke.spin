@@ -2,7 +2,7 @@
 ==================================================
 PeekPoke.spin
 Version 0.5.0 (alpha/experimental)
-25 April 2018
+29 April 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
@@ -285,7 +285,7 @@ initShift                       mov         initShiftLimit-1, initShiftLimit-1-(
 
                                 jmp         #ReceiveCommand
 
-initPermissions         long    $ff ^ cEnablePayloadExec
+initPermissions         long    cEnableWriteHub | cEnableSetSerialTimings | cEnableBreakDetection
 
 { initEnd is the last real (not reserved) register before initShiftStart. Its address is used by the initialization shifting code. }
 initEnd
@@ -305,18 +305,18 @@ initShiftStart
     The following registers store some settings. Some settings are stored in other locations (within
   instructions in some cases), and some are stored in multiple locations.
 }
-bitPeriod0              long    cBitPeriod0                                 'MUST be at even addressed register
-bitPeriod1              long    cBitPeriod1                                 'MUST immeidately follow bitPeriod1
+bitPeriod0              long    cBitPeriod0             'MUST be at even addressed register
+bitPeriod1              long    cBitPeriod1             'MUST immediately follow bitPeriod0
 startBitWait            long    cStartBitWait
 stopBitDuration         long    cStopBitDuration
 timeout                 long    cTimeout
 recoveryTime            long    cRecoveryTime
 breakMultiple           long    cBreakMultiple
-rxMask                  long    |< cRxPin                                   'rx pin also stored in rcvyLowCounterMode
+rxMask                  long    |< cRxPin               'rx pin also stored in rcvyLowCounterMode
 txMask                  long    |< cTxPin
 
-layoutID                long    $a0b1_c2d3                                  'todo: change when layout finalized
-ppToken                 long    0
+layoutID                long    0                       'todo: change when layout is finalized
+ppToken                 long    0                       'must be zero at launch
 
 kFFFF                   long    $ffff
 kOneInDField            long    $200
@@ -453,8 +453,7 @@ _RcvyLoopJump                   djnz        _rcvyCountdown, #_RcvyLoopTop       
                         { fall through to BreakHandler }
 
 { BreakHandler 
-    The default behavior when a break is detected is to reset the serial timings to the last known
-  good values.
+    When a break is detected the serial timings are reset to the last known good values.
     This code is executed immediately after the break is detected, while it may still be ongoing.
 }
 BreakHandler                
