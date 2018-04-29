@@ -1,5 +1,5 @@
 # PeekPoke
-# 27 April 2018
+# 28 April 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -17,10 +17,7 @@ VERSION = __version__
 
 class PeekPoke():
 
-    MAX_ATOMIC_READ = 260
-    MAX_ATOMIC_WRITE = 256
-
-    def __init__(self, serial_port_name, address=1, port=112):
+    def __init__(self, serial_port_name, *, address=1, port=112):
         if address < 1 or address > 31:
             raise ValueError("The address must be 1 to 31.")
         if port < 0 or port > 255:
@@ -43,7 +40,7 @@ class PeekPoke():
             self._host = Host(serial_port_name)
         finally:
             self._select_propcr_order()
-            self._last_good_baudrate = None
+        self._last_good_baudrate = None
 
     @property
     def address(self):
@@ -84,17 +81,18 @@ class PeekPoke():
             raise ValueError("The port must be 0 to 255.")
         self._port = port
 
+    @property
+    def baudrate(self):
+        return self._host.serial_port.get_baudrate(self._address)
 
-    # Miscellaneous
-
-    def get_par(self):
-        info = self._get_info()
-        return info.par
+    @baudrate.setter
+    def baudrate(self, baudrate):
+        self._host.serial_port.set_baudrate(self._address, baudrate)
 
 
-    # Hub Memory Operations
+    # Hub Memory: Binary Data Methods
 
-    def get_bytearray(self, hub_address, count, *, atomic=False):
+    def get_bytes(self, hub_address, count, *, atomic=False):
         PeekPoke._verify_hub_args(hub_address, count, True, atomic)
         result = bytearray()
         while count > 0:
@@ -104,9 +102,9 @@ class PeekPoke():
             hub_address = (hub_address + atomic_count)%65536
         return result
 
-    def set_bytearray(self, hub_address, data, *, atomic=False):
-        PeekPoke._verify_hub_args(hub_address, count, False, atomic)
+    def set_bytes(self, hub_address, data, *, atomic=False):
         count = len(data)
+        PeekPoke._verify_hub_args(hub_address, count, False, atomic)
         index = 0
         while count > 0:
             atomic_count = min(count, PeekPoke.MAX_ATOMIC_WRITE)
@@ -114,6 +112,22 @@ class PeekPoke():
             self._write_hub(hub_address, data[index:index+atomic_count])
             hub_address = (hub_address + atomic_count)%65536
             index += atomic_count
+
+    def fill_bytes(self, hub_address, num_bytes, pattern, *, atomic=False):
+        data = bytearray(num_bytes)
+        if pattern != b'\x00':
+            pattern_len = len(pattern)
+            if pattern_len == 0:
+                raise ValueError("The pattern must not be empty.")
+            index = 0
+            while index < num_bytes:
+                n = min(pattern_len, num_bytes-index)
+                data[index:index+n] = pattern[0:n]
+                index += n
+        self.set_bytes(hub_address, data, atomic=atomic)
+
+
+    # Hub Memory: String Methods
 
     def get_str(self, hub_address, max_bytes, *, encoding='latin_1', errors='replace', nul_terminated=True, atomic=False):
         PeekPoke._verify_hub_args(hub_address, max_bytes, True, atomic)
@@ -132,58 +146,35 @@ class PeekPoke():
                 max_bytes -= atomic_count
                 result += self._read_hub(hub_address, atomic_count)
                 hub_address = (hub_address + atomic_count)%65536
+        if len(result) == 0:
+            return ''
         if nul_terminated and result[-1] == 0:
-            return result[0:-1].decode(encoding=encoding, errors=errors)
+            return result[:-1].decode(encoding=encoding, errors=errors)
         else:
             return result.decode(encoding=encoding, errors=errors)
 
-    def set_str(self, hub_address, string, max_bytes, *, encoding='latin_1', errors='replace', nul_terminated=True, atomic=False):
+    def set_str(self, hub_address, max_bytes, string, *, encoding='latin_1', errors='replace', nul_terminated=True, truncate=False, atomic=False):
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be greater than zero.")
         data = string.encode(encoding=encoding, errors=errors)
         if nul_terminated:
-            new_data = bytearray(data)
-            data = new_data + b'\x00'
-        if len(data) > max_bytes:
-            raise ValueError("The encoded string size (" + str(len(data)) + ") exceeds the max_bytes limit (" + str(max_bytes) + ").")
-        self.set_bytearray(hub_address, data, atomic=atomic)
+            if len(data) >= max_bytes:
+                if truncate:
+                    data = bytearray(data[0:max_bytes-1]) + b'\x00'
+                else:
+                    raise ValueError("The encoded string size (" + str(len(data)) + ") plus the terminating NUL exceeds the max_bytes limit (" + str(max_bytes) + ").")
+            else:
+                data = bytearray(data) + b'\x00'
+        else:
+            if len(data) > max_bytes:
+                if truncate:
+                    data = data[0:max_bytes]
+                else:
+                    raise ValueError("The encoded string size (" + str(len(data)) + ") exceeds the max_bytes limit (" + str(max_bytes) + ").")
+        self.set_bytes(hub_address, data, atomic=atomic)
 
-    # todo: add stride options to int methods
-    # todo: add three byte lengths to int methods
 
-    def get_byte(self):
-        pass
-
-    def get_word(self):
-        pass
-
-    def get_long(self):
-        pass
-
-    def set_byte(self):
-        pass
-
-    def set_word(self):
-        pass
-
-    def set_long(self):
-        pass
-
-    def get_bytes(self):
-        pass
-
-    def get_words(self):
-        pass
-
-    def get_longs(self):
-        pass
-
-    def set_bytes(self):
-        pass
-
-    def set_words(self):
-        pass
-
-    def set_longs(self):
-        pass
+    # Hub Memory: Integer Methods
 
     def get_int(self, hub_address, length, *, alignment='length', byteorder='little', signed=False):
         PeekPoke._verify_int_length(length)
@@ -192,96 +183,37 @@ class PeekPoke():
         data = self._read_hub(hub_address, length)
         return int.from_bytes(data, byteorder, signed=signed)
 
-    def set_int(self, hub_address, integer, length, *, alignment='length', byteorder='little', signed=False):
+    def set_int(self, hub_address, length, integer, *, alignment='length', byteorder='little', signed=False):
         PeekPoke._verify_int_length(length)
         PeekPoke._verify_hub_args(hub_address, length, False, True)
         PeekPoke._verify_int_alignment(hub_address, length, alignment)
         data = integer.to_bytes(length, byteorder, signed=signed)
         self._write_hub(hub_address, data)
 
-    def get_ints(self, hub_address, count, length, *, byteorder='little', signed=False, atomic=False):
+    def get_ints(self, hub_address, length, count, *, alignment='length', byteorder='little', signed=False, atomic=False):
         PeekPoke._verify_int_length(length)
         PeekPoke._verify_int_alignment(hub_address, length, alignment)
+        # get_bytes will verify hub args.
         num_bytes = count*length
-        data = self.get_bytearray(hub_address, num_bytes, atomic=atomic)
+        data = self.get_bytes(hub_address, num_bytes, atomic=atomic)
         integers = []
         index = 0
         for _i in range(0, count):
-            integers += int.from_bytes(data[index:index+length], byteorder, signed=signed)
+            integers.append(int.from_bytes(data[index:index+length], byteorder, signed=signed))
+            index += length
         return integers
 
-    def set_ints(self, hub_address, integers, length, *, byteorder='little', signed=False, atomic=False):
+    def set_ints(self, hub_address, length, integers, *, alignment='length', byteorder='little', signed=False, atomic=False):
         PeekPoke._verify_int_length(length)
         PeekPoke._verify_int_alignment(hub_address, length, alignment)
+        # set_bytes will verify hub args.
         data = bytearray()
         for i in integers:
             data += i.to_bytes(length, byteorder, signed=signed)
-        self.set_bytearray(hub_address, data, atomic=atomic)  
-
-    @staticmethod
-    def _verify_int_length(length):
-        if length != 1 and length != 2 and length != 4 and length != 8:
-            raise ValueError("Valid int lengths are 1, 2, 4, and 8 bytes.")
-
-    @staticmethod
-    def _verify_int_alignment(hub_address, length, alignment):
-        if alignment == 'length':
-            if hub_address % length != 0:
-                raise ValueError("The hub address is not aligned to the integer length (alignment='length' selected).")
-            return
-        if alignment == 'byte':
-            return
-        if alignment == 'word':
-            if hub_address % 2 != 0:
-                raise ValueError("The hub address is not word-aligned (alignment='word' selected).")
-            return
-        if alignment == 'long':
-            if hub_address % 4 != 0:
-                raise ValueError("The hub address is not long-aligned (alignment='long' selected).")
-            return
-        raise ValueError("Valid alignment options are 'length', 'byte', 'word', and 'long'.")
-
-
-    # Token Methods
-
-    def get_token(self, *, byteorder='little', signed=False):
-        token_bytes = self.get_token_bytes()
-        return int.from_bytes(token_bytes, byteorder, signed=signed)
-
-    def set_token(self, token, *, byteorder='little', signed=False):
-        if token < 0 and not signed:
-            raise ValueError("Please use the 'signed=True' argument for negative numbers.") 
-        token_bytes = token.to_bytes(4, byteorder, signed=signed)
-        prev_token_bytes = self.set_token_bytes(token_bytes)
-        return int.from_bytes(prev_token_bytes, byteorder, signed=signed)
-
-    def get_token_bytes(self):
-        transaction = self._send_command(6)
-        return PeekPoke._parse_token_command(transaction)
-
-    def set_token_bytes(self, token, *, use_padding=True):
-        if len(token) < 4:
-            if use_padding:
-                new_token = bytearray(4)
-                new_token[0:len(token)] = token[0:]
-                token = new_token
-            else:
-                raise ValueError("The token must be exactly four bytes if padding is not used.")
-        if len(token) > 4:
-            raise ValueError("Too many bytes provided -- the token is a four-byte value.")
-        transaction = self._send_command(7, token)
-        return PeekPoke._parse_token_command(transaction)
+        self.set_bytes(hub_address, data, atomic=atomic)
 
 
     # Baudrate Methods
-
-    @property
-    def baudrate(self):
-        return self._host.serial_port.get_baudrate(self._address)
-
-    @baudrate.setter
-    def baudrate(self, baudrate):
-        self._host.serial_port.set_baudrate(self._address, baudrate)
 
     def switch_baudrate(self, baudrate, *, clkfreq=None, use_hub_clkfreq=False):
         """Sets both the local and remote baudrates."""
@@ -289,9 +221,7 @@ class PeekPoke():
             if use_hub_clkfreq:
                 clkfreq = int.from_bytes(self._read_hub(0, 4), 'little')
             else:
-                curr_baudrate = self.baudrate
-                curr_timings = self._get_serial_timings()
-                clkfreq = ( (curr_timings.bit_period_0 + curr_timings.bit_period_1) * curr_baudrate) / 2
+                clkfreq = self.estimate_clkfreq()
         timings = SerialTimings()
         two_bit_period = int((2 * clkfreq) / baudrate)
         if two_bit_period < 52:
@@ -313,6 +243,46 @@ class PeekPoke():
             raise RuntimeError("Cannot revert the baudrate before there has been a successful PeekPoke transaction using the current serial port and address.")
         self.baudrate = self._last_good_baudrate
         self._host.serial_port.serial.send_break(self._break_duration)
+
+
+    # Token Methods
+
+    def get_token(self, *, byteorder='little', signed=False):
+        token_bytes = self.get_token_bytes()
+        return int.from_bytes(token_bytes, byteorder, signed=signed)
+
+    def set_token(self, token, *, byteorder='little', signed=False):
+        token_bytes = token.to_bytes(4, byteorder, signed=signed)
+        prev_token_bytes = self.set_token_bytes(token_bytes)
+        return int.from_bytes(prev_token_bytes, byteorder, signed=signed)
+
+    def get_token_bytes(self):
+        transaction = self._send_command(6)
+        return PeekPoke._parse_token_command(transaction)
+
+    def set_token_bytes(self, token, *, use_padding=True):
+        if len(token) < 4:
+            if use_padding:
+                new_token = bytearray(4)
+                new_token[0:len(token)] = token[0:]
+                token = new_token
+            else:
+                raise ValueError("The token must be exactly four bytes if padding is not used.")
+        elif len(token) > 4:
+            raise ValueError("Too many bytes provided -- the token is a four-byte value.")
+        transaction = self._send_command(7, token)
+        return PeekPoke._parse_token_command(transaction)
+
+
+    # Miscellaneous
+
+    def get_par(self):
+        info = self._get_info()
+        return info.par
+
+    def estimate_clkfreq(self):
+        timings = self._get_serial_timings()
+        return ( (timings.bit_period_0 + timings.bit_period_1) * self.baudrate) / 2.0
 
 
     # Internal Command Methods
@@ -354,12 +324,12 @@ class PeekPoke():
             raise ValueError("The block argument to payload_exec must have at least 8 bytes.")
         return self._send_command(8, block, response_expected)
         
-    def _send_command(self, code, data=None, response_expected=True):
-        command = bytearray(b'\x70\x70\x00') + code.to_bytes(1, 'little')
+    def _send_command(self, command_code, data=None, response_expected=True):
+        command = bytearray(b'\x70\x70\x00') + command_code.to_bytes(1, 'little')
         if data is not None:
             command += data
         transaction = self._host.send_command(address=self._address, port=self._port, payload=command, response_expected=response_expected)
-        transaction.command_code = code
+        transaction.command_code = command_code
         self._last_good_baudrate = self.baudrate
         return transaction
 
@@ -368,6 +338,7 @@ class PeekPoke():
 
     @staticmethod
     def _verify_hub_args(hub_address, count, is_read, atomic):
+        # Used by hub memory methods to verify arguments.
         if hub_address < 0 or hub_address > 65535:
             raise ValueError("The hub address must be 0 to 65535.")
         if atomic:
@@ -380,6 +351,29 @@ class PeekPoke():
                 raise ValueError("The hub read operation may request 0 to 65536 bytes.")
             else:
                 raise ValueError("Hub writes may not exceed 65536 bytes.")
+
+    @staticmethod
+    def _verify_int_length(length):
+        if length != 1 and length != 2 and length != 4 and length != 8:
+            raise ValueError("Valid integer lengths are 1, 2, 4, and 8 bytes.")
+
+    @staticmethod
+    def _verify_int_alignment(hub_address, length, alignment):
+        if alignment == 'length':
+            if hub_address % length != 0:
+                raise ValueError("The hub address is not aligned to the integer length (alignment='length' selected).")
+            return
+        if alignment == 'byte':
+            return
+        if alignment == 'word':
+            if hub_address % 2 != 0:
+                raise ValueError("The hub address is not word-aligned (alignment='word' selected).")
+            return
+        if alignment == 'long':
+            if hub_address % 4 != 0:
+                raise ValueError("The hub address is not long-aligned (alignment='long' selected).")
+            return
+        raise ValueError("Valid alignment options are 'length', 'byte', 'word', and 'long'.")
 
     @staticmethod
     def _verify_essentials(transaction, expected_size):
@@ -438,6 +432,12 @@ class PeekPoke():
         return transaction.response[4:8]
 
 
+    # Constants From Propeller Implementation
+
+    MAX_ATOMIC_READ = 260
+    MAX_ATOMIC_WRITE = 256
+
+
 class PeekPokeError(ClientError):
     def __init__(self, transaction, message):
         super().__init__(transaction.address, transaction.port, message)
@@ -454,7 +454,7 @@ class PeekPokeInfo():
 
 class SerialTimings():
 
-    def __init__(self, binary=None):
+    def __init__(self, *, binary=None):
         self.bit_period_0 = 0
         self.bit_period_1 = 0  
         self.start_bit_wait = 0  
@@ -480,7 +480,7 @@ class SerialTimings():
         return binary
 
     def set_from_binary(self, binary):
-        # Assumes binary is bytes-like and first 32 bytes are in expected format.
+        # Assumes binary is bytes-like and first 28 bytes are in expected format.
         self.bit_period_0       = int.from_bytes(binary[0:4], 'little')
         self.bit_period_1       = int.from_bytes(binary[4:8], 'little')
         self.start_bit_wait     = int.from_bytes(binary[8:12], 'little')

@@ -1,6 +1,6 @@
 ======================================
 PeekPoke Protocol.txt
-26 April 2018
+28 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
 ======================================
@@ -38,9 +38,8 @@ Payload Format
 ==============
 
 All commands have a four byte initial header: 0x70, 0x70, 0x00, and
-commandCode. Any additional payload data depends on the command.
-
-The response repeats the same initial four byte header.
+commandCode. Responses repeat the same initial four byte header. Any
+additional payload data depends on the command.
 
 Errors are reported using Crow-level error responses.
 
@@ -204,7 +203,7 @@ Command payload, 12+ bytes:
         pos     len     description
         0       4       initial header
         4       4       layoutID
-        8+      -       PASM code
+        8+      4+      PASM code
 
 Response payload, 4+ bytes (if sent):
         pos     len     description
@@ -216,7 +215,7 @@ The layoutID argument identifies what layout the payload code expects. Only if
 the payload's expected layout matches the implementation's will the payload
 code be executed.
 
-Execution starts at the beginning of the PASM code block.
+Execution starts at the beginning of the PASM code.
 
 If a response is returned it must begin with the standard initial header.
 
