@@ -1,5 +1,5 @@
 # PeekPoke
-# 29 April 2018
+# 30 April 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -9,9 +9,11 @@
 from crow.host import Host
 from crow.host_serial import HostSerialSettings
 from crow.errors import ClientError
+from crow.errors import InvalidCommandError
+from crow.errors import ServiceError
 
 
-__version__ = '0.6.0'
+__version__ = '0.6.1'
 VERSION = __version__
 
 
@@ -271,6 +273,10 @@ class PeekPoke():
         info = self.get_info(use_cached=use_cached)
         return info.par
 
+    def get_identifier(self, *, use_cached=True):
+        info = self.get_info(use_cached=use_cached)
+        return info.identifier
+
     def get_info(self, *, use_cached=True):
         if not use_cached or self._info is None:
             self._info = self._get_info()
@@ -288,20 +294,23 @@ class PeekPoke():
         return PeekPoke._parse_get_info(transaction)
 
     def _read_hub(self, hub_address, count):
-        # It is assumed that hub_address is in [0, 65535] and count is in [0, max_atomic_read].
+        # It is assumed that hub_address is in [0, 65535] and count is in [0, max_atomic_read],
+        #  and there is no wrap around.
         cmd_data = hub_address.to_bytes(2, 'little') + count.to_bytes(2, 'little')
         transaction = self._send_command(1, cmd_data)
         transaction.count = count
         return PeekPoke._parse_read_hub(transaction)
 
     def _write_hub(self, hub_address, data):
-        # It is assumed that hub_address is in [0, 65535] and len(data) is in [0, max_atomic_write].
+        # It is assumed that hub_address is in [0, 65535] and len(data) is in [0, max_atomic_write],
+        #  and there is no wrap around.
         cmd_data = hub_address.to_bytes(2, 'little') + len(data).to_bytes(2, 'little') + data
         transaction = self._send_command(2, cmd_data)
-        PeekPoke._verify_essentials(transaction, 4)
+        PeekPoke._verify_essentials(transaction, 4, 4)
 
     def _read_hub_str(self, hub_address, max_bytes):
-        # It is assumed that hub_address is in [0, 65535] and count is in [0, max_atomic_read].
+        # It is assumed that hub_address is in [0, 65535] and count is in [0, max_atomic_read],
+        #  and there is no wrap around.
         cmd_data = hub_address.to_bytes(2, 'little') + max_bytes.to_bytes(2, 'little')
         transaction = self._send_command(3, cmd_data)
         transaction.max_bytes = max_bytes
@@ -312,8 +321,8 @@ class PeekPoke():
         return PeekPoke._parse_get_serial_timings(transaction)
 
     def _set_serial_timings(self, timings):
-        transaction = self._send_command(5, timings.get_as_binary())
-        PeekPoke._verify_essentials(transaction, 4)
+        transaction = self._send_command(5, timings.as_bytes())
+        PeekPoke._verify_essentials(transaction, 4, 4)
 
     def _payload_exec(self, block, response_expected=True):
         if len(block) < 8:
@@ -324,7 +333,30 @@ class PeekPoke():
         command = bytearray(b'\x70\x70\x00') + command_code.to_bytes(1, 'little')
         if data is not None:
             command += data
-        transaction = self._host.send_command(address=self._address, port=self._port, payload=command, response_expected=response_expected)
+        # todo: rewrite when custom service error callbacks are added to host implementation
+        try:
+            transaction = self._host.send_command(address=self._address, port=self._port, payload=command, response_expected=response_expected)
+        except ServiceError as e:
+            if e.number == 128 and len(data) >= 4:
+                details = {'command_code': command_code, 'hub_address': int.from_bytes(data[0:2], 'little'), 'count': int.from_bytes(data[2:4], 'little')}
+                # Add string version of command.
+                if command_code == 1:
+                    details['command'] = "readHub"
+                elif command_code == 2:
+                    details['command'] = "writeHub"
+                elif command_code == 3:
+                    details['command'] = "readHubStr"
+                # Add allowed ranges, if cached.
+                if self._info is not None:
+                    if command_code == 1 or command_code == 3:
+                        details['min_read_address'] = self._info.min_read_address
+                        details['max_read_address'] = self._info.max_read_address
+                    elif command_code == 2:
+                        details['min_write_address'] = self._info.min_write_address
+                        details['max_write_address'] = self._info.max_write_address
+                raise AddressForbiddenError(self._address, self._port, details)
+            else:
+                raise
         transaction.command_code = command_code
         self._last_good_baudrate = self.baudrate
         return transaction
@@ -347,6 +379,8 @@ class PeekPoke():
                 raise ValueError("The hub read operation may request 0 to 65536 bytes.")
             else:
                 raise ValueError("Hub writes may not exceed 65536 bytes.")
+        if hub_address + count > 65536:
+            raise ValueError("Hub memory operations may not wrap around the end of the hub address space.")
 
     # The save and revert technique being used here can 'fix' the default propcr order.
     #  The underlying settings object for the address will initially have propcr_order=None,
@@ -391,9 +425,9 @@ class PeekPoke():
         raise ValueError("Valid alignment options are 'length', 'byte', 'word', and 'long'.")
 
     @staticmethod
-    def _verify_essentials(transaction, expected_size):
-        # Verifies that the response has a valid initial header, and that it
-        #  has the expected size (if specified).
+    def _verify_essentials(transaction, min_size, max_size):
+        # Verifies that the response has a valid initial header, and that its
+        #  size is in the expected range (which may be open ended at both limits).
         rsp = transaction.response
         if len(rsp) == 0:
             raise PeekPokeError(transaction, "The response is empty.")
@@ -403,44 +437,51 @@ class PeekPoke():
             raise PeekPokeError(transaction, "The response identifier is incorrect.")
         if rsp[3] != transaction.command_code:
             raise PeekPokeError(transaction, "The response code is incorrect.")
-        if expected_size is not None:
-            if len(rsp) < expected_size:
-                raise PeekPokeError(transaction, "The response has less than " + str(expected_size) + " bytes.")
-            elif len(rsp) > expected_size:
-                raise PeekPokeError(transaction, "The response has more than " + str(expected_size) + " bytes.")
+        if min_size is not None and len(rsp) < min_size:
+            raise PeekPokeError(transaction, "The response has less than " + str(min_size) + " bytes.")
+        if max_size is not None and len(rsp) > max_size:
+            raise PeekPokeError(transaction, "The response has more than " + str(max_size) + " bytes.")
 
     @staticmethod
     def _parse_get_info(transaction):
-        PeekPoke._verify_essentials(transaction, 24)
+        PeekPoke._verify_essentials(transaction, 30, None)
         return PeekPokeInfo(transaction.response)
 
     @staticmethod
     def _parse_read_hub(transaction):
-        PeekPoke._verify_essentials(transaction, transaction.count + 4)
+        expected_size = transaction.count + 4
+        PeekPoke._verify_essentials(transaction, expected_size, expected_size)
         return transaction.response[4:]
 
     @staticmethod
     def _parse_read_hub_str(transaction):
-        PeekPoke._verify_essentials(transaction, None)
+        PeekPoke._verify_essentials(transaction, None, transaction.max_bytes + 4)
         rsp = transaction.response
-        expected_max_size = transaction.max_bytes + 4
-        if len(rsp) > expected_max_size:
-            raise PeekPokeError(transaction, "The response has more data than requested.")
-        elif transaction.max_bytes != 0 and len(rsp) == 4:
+        if transaction.max_bytes != 0 and len(rsp) == 4:
             raise PeekPokeError(transaction, "The response unexpectedly did not return any data.")
         return rsp[4:]
 
     @staticmethod
     def _parse_get_serial_timings(transaction):
-        PeekPoke._verify_essentials(transaction, 32)
-        return SerialTimings(binary=transaction.response[4:32])
+        PeekPoke._verify_essentials(transaction, 5, None)
+        try:
+            return SerialTimings(data=transaction.response[4:])
+        except ValueError as e:
+            raise PeekPokeError(transaction, str(e))
 
     @staticmethod
     def _parse_token_command(transaction):
         # getToken and setToken both return an 8 byte response where the
         #  last four bytes are a token (either current or previous value).
-        PeekPoke._verify_essentials(transaction, 8)
+        PeekPoke._verify_essentials(transaction, 8, 8)
         return transaction.response[4:8]
+
+
+class AddressForbiddenError(InvalidCommandError):
+    def __init__(self, address, port, details):
+        super().__init__(address, port, details)
+    def __str__(self):
+        return "The requested hub memory operation is outside the allowed range. " + super().extra_str()
 
 
 class PeekPokeError(ClientError):
@@ -452,6 +493,7 @@ class PeekPokeError(ClientError):
 
 
 class PeekPokeInfo():
+
     def __init__(self, response):
         self.max_atomic_read = int.from_bytes(response[4:6], 'little')
         self.max_atomic_write = int.from_bytes(response[6:8], 'little')
@@ -460,13 +502,19 @@ class PeekPokeInfo():
         self.min_write_address = int.from_bytes(response[12:14], 'little')
         self.max_write_address = int.from_bytes(response[14:16], 'little')
         self.layout_id = response[16:20]
-        self.par = int.from_bytes(response[20:22], 'little')
-        self.available_commands_bitmask = int.from_bytes(response[22:24], 'little')
+        self.identifier = int.from_bytes(response[20:24], 'little')
+        self.par = int.from_bytes(response[24:26], 'little')
+        self.available_commands_bitmask = int.from_bytes(response[26:28], 'little')
+        self.serial_timings_format = response[28]
+        self.peekpoke_version = response[29]
+
+    def __str__(self):
+        return "PeekPoke device info, max_atomic_read: " + str(self.max_atomic_read) + ", max_atomic_write: " + str(self.max_atomic_write) + ", min_read_address: " + str(self.min_read_address) + ", max_read_address: " + str(self.max_read_address) + ", min_write_address: " + str(self.min_write_address) + ", max_write_address: " +str(self.max_write_address) + ", layout_id: [" + self.layout_id.hex() + "], identifier: " + str(self.identifier) + ", par: " + str(self.par) + ", available_commands_bitmask: {:#4x}".format(self.available_commands_bitmask) + ", serial_timings_format: " + str(self.serial_timings_format) + ", peekpoke_version: " + str(self.peekpoke_version) + "."
 
 
 class SerialTimings():
 
-    def __init__(self, *, binary=None):
+    def __init__(self, *, data=None):
         self.bit_period_0 = 0
         self.bit_period_1 = 0  
         self.start_bit_wait = 0  
@@ -474,30 +522,42 @@ class SerialTimings():
         self.interbyte_timeout = 0
         self.recovery_time = 0
         self.break_multiple = 0 
-        if binary is not None:
-            self.set_from_binary(binary)
+        if data is not None:
+            self.set_from_bytes(data)
+
+    @property
+    def format(self):
+        return 0
 
     def __str__(self):
-        return "PropCR serial timings; bit_period_0: " + str(self.bit_period_0) + ", bit_period_1: " + str(self.bit_period_1) + ", start_bit_wait: " + str(self.start_bit_wait) + ", stop_bit_duration: " + str(self.stop_bit_duration) + ", interbyte_timeout: " + str(self.interbyte_timeout) + ", recovery_time: " + str(self.recovery_time) + ", break_multiple: " + str(self.break_multiple) + "."
+        return "Serial timings, format: 0, bit_period_0: " + str(self.bit_period_0) + ", bit_period_1: " + str(self.bit_period_1) + ", start_bit_wait: " + str(self.start_bit_wait) + ", stop_bit_duration: " + str(self.stop_bit_duration) + ", interbyte_timeout: " + str(self.interbyte_timeout) + ", recovery_time: " + str(self.recovery_time) + ", break_multiple: " + str(self.break_multiple) + "."
 
-    def get_as_binary(self):
-        binary = bytearray()
-        binary += self.bit_period_0.to_bytes(4, 'little')
-        binary += self.bit_period_1.to_bytes(4, 'little')
-        binary += self.start_bit_wait.to_bytes(4, 'little')
-        binary += self.stop_bit_duration.to_bytes(4, 'little')
-        binary += self.interbyte_timeout.to_bytes(4, 'little')
-        binary += self.recovery_time.to_bytes(4, 'little')
-        binary += self.break_multiple.to_bytes(4, 'little')
-        return binary
+    def as_bytes(self):
+        # The first byte is format (0), the next three are padding.
+        data = bytearray(4)           
+        data += self.bit_period_0.to_bytes(4, 'little')
+        data += self.bit_period_1.to_bytes(4, 'little')
+        data += self.start_bit_wait.to_bytes(4, 'little')
+        data += self.stop_bit_duration.to_bytes(4, 'little')
+        data += self.interbyte_timeout.to_bytes(4, 'little')
+        data += self.recovery_time.to_bytes(4, 'little')
+        data += self.break_multiple.to_bytes(4, 'little')
+        return data
 
-    def set_from_binary(self, binary):
-        # Assumes binary is bytes-like and first 28 bytes are in expected format.
-        self.bit_period_0       = int.from_bytes(binary[0:4], 'little')
-        self.bit_period_1       = int.from_bytes(binary[4:8], 'little')
-        self.start_bit_wait     = int.from_bytes(binary[8:12], 'little')
-        self.stop_bit_duration  = int.from_bytes(binary[12:16], 'little')
-        self.interbyte_timeout  = int.from_bytes(binary[16:20], 'little')
-        self.recovery_time      = int.from_bytes(binary[20:24], 'little')
-        self.break_multiple     = int.from_bytes(binary[24:28], 'little')
+    def set_from_bytes(self, data):
+        # The following byte positions differ from the specification since
+        #  the initial header is not included.
+        if len(data) == 0:
+            raise ValueError("The serial timings data must not be empty.")
+        if data[0] != 0:
+            raise ValueError("The serial timings format (" + str(data[0]) + ") is not supported.")
+        if len(data) != 32:
+            raise ValueError("The serial timings data has the wrong size (expected 32 bytes, got " + str(len(data)) + ").")
+        self.bit_period_0       = int.from_bytes(data[4:8], 'little')
+        self.bit_period_1       = int.from_bytes(data[8:12], 'little')
+        self.start_bit_wait     = int.from_bytes(data[12:16], 'little')
+        self.stop_bit_duration  = int.from_bytes(data[16:20], 'little')
+        self.interbyte_timeout  = int.from_bytes(data[20:24], 'little')
+        self.recovery_time      = int.from_bytes(data[24:28], 'little')
+        self.break_multiple     = int.from_bytes(data[28:32], 'little')
 

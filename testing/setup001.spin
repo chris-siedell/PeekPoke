@@ -1,6 +1,6 @@
 {
 setup001.spin
-28 April 2018
+30 April 2018
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
 homepage: http://siedell.com/projects/PeekPoke/
@@ -21,13 +21,13 @@ obj
 
 var
 
-    word addrTable[21]
     long buffer[1000]
+    word addrTable[22]
+    byte results[8]
 
 
 pub main
 
-    'addrTable points to the reference values.
     addrTable[0]  := @setupName
     addrTable[1]  := @empty
     addrTable[2]  := @a
@@ -51,13 +51,44 @@ pub main
     addrTable[20] := @longList
     addrTable[21] := @buffer
 
-    peekpoke.start(@addrTable)
+    results[0] := peekpoke.start(@addrTable)
 
-    'Instance at address 2 restricts ranges.
     peekpoke.setAddress(2)
     peekpoke.setReadRange(@buffer, @buffer + 3999)
     peekpoke.setWriteRange(@buffer, @buffer + 2999)
-    peekpoke.start(@buffer)
+    results[1] := peekpoke.start(@buffer)
+
+    peekpoke.setAddress(3)
+    peekpoke.setReadRange(@buffer, @buffer)
+    peekpoke.setWriteRange(@buffer + 1, @buffer + 1)
+    results[2] := peekpoke.start(@buffer)
+
+    peekpoke.setAddress(4)
+    peekpoke.setPort(200)
+    peekpoke.setBaudrate(57600)
+    peekpoke.disableBreakDetection
+    results[3] := peekpoke.start(0)
+
+    peekpoke.setAddress(5)
+    peekpoke.setPort(112)
+    peekpoke.setBaudrate(115200)
+    peekpoke.disableWriteHub
+    peekpoke.disableSetSerialTimings
+    results[4] := peekpoke.start(2018) 'expect 2016 due to zeroed low bits
+   
+    peekpoke.setAddress(6)
+    peekpoke.enableWriteHub
+    peekpoke.enableSetSerialTimings
+    peekpoke.enableBreakDetection 
+    results[5] := peekpoke.start($ffff) 'expect $fffc
+
+    peekpoke.setAddress(7)
+    peekpoke.setReadRange(0, $8fff)
+    results[6] := peekpoke.start(@buffer)
+
+    peekpoke.setAddress(8)
+    results[7] := peekpoke.start(0) 'should fail to launch, returning 0
+    peekpoke.init(cogid, @results)
 
 
 dat

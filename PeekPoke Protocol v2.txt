@@ -1,16 +1,19 @@
 ======================================
 PeekPoke Protocol v2.txt
-29 April 2018
+30 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
 ======================================
 
 PeekPoke is a tool for reading and writing the hub RAM of a Parallax Propeller 
 P8X32A microcontroller from a computer. PeekPoke also has additional features:
+    - supporting string reads (stops after first NUL),
+    - limiting reads and writes to allowed ranges,
     - getting the PAR register of the launched instance,
     - getting and setting the serial timings,
     - resetting the serial timings with a break condition,
-    - getting and setting a cog-based token for session management, and
+    - getting a cog-based identifier (set by user),
+    - getting and setting a cog-based token (for session management), and
     - executing arbitrary code sent by the PC.
 
 Some of these features may be disabled.
@@ -26,12 +29,10 @@ The protocol identifier is "PeekPoke".
 Break Detection
 ===============
 
-In the default implementation the serial timings will be reset to the last
-known good values when a break condition is detected. The last known good
-values are saved every time a valid command is received, even if the command
-is addressed to a different device or is too large for the device.
-
-Break detection can be disabled.
+Break detection, if enabled, is used to instruct the implementation to reset
+its serial timings to the last known good values. The last known good values
+are saved every time a PeekPoke command is received -- CrowAdmin commands like
+ping will not cause the timings to be saved.
 
 
 Payload Format
@@ -57,6 +58,7 @@ These are the command codes:
     8 - payloadExec
     9-14 - reserved
     15 - reserved for indicating break detection support (see getInfo)
+    16-255 - reserved
 
 
 getInfo
@@ -66,7 +68,7 @@ Command payload, 4 bytes:
         pos     len     description
         0       4       initial header
 
-Response payload, 24 bytes:
+Response payload, 30+ bytes:
         pos     len     description
         0       4       initial header
         4       2       max single command read size
@@ -75,14 +77,34 @@ Response payload, 24 bytes:
         10      2       max allowed read address
         12      2       min allowed write address
         14      2       max allowed write address
-        16      4       implementation's layoutID (for payloadExec)
-        20      2       par
-        22      2       available commands
+        16      4       layoutID
+        20      4       identifier
+        24      2       par
+        26      2       available commands
+        28      1       serial timings format
+        29      1       PeekPoke version of implementation (currently 2)
+       (30+     0       reserved)
 
+The information returned by this command is constant for the given instance.
+
+layoutID is a four byte value that uniquely identifies the build of PeekPoke.
+It is used to ensure that payloadExec code was compiled using the correct
+symbol information.
+
+identifier is a four byte constant that may be assigned any value by the user.
+It can be used to identify the project, for example.
+ 
 The available commands bitfield has bits set corresponding to the command
 codes. For example, if bit 2 is set then writeHub is available. Bits 9 to 14
 must always be set to 0 by devices implementing this version of PeekPoke. Bit
 15 indicates whether the device has break detection enabled.
+
+The serial timings format field identifies the format of the getSerialTimings
+and setSerialTimings payloads used and expected by the implementation.
+
+Future versions of the protocol may add more information to this response. Any
+added information will have constant values for the given instance, and will
+follow the fields already defined.
 
 
 readHub
@@ -99,6 +121,9 @@ Response payload, 4+count bytes:
         0       4       initial header
         4+      count   the bytes read
 
+Reads may not wrap around the end of hub RAM. The requested read must be
+entirely within the allowed range or it will not be performed.
+
 
 writeHub
 ========
@@ -113,6 +138,9 @@ Command payload, 8 bytes:
 Response payload, 4 bytes:
         pos     len     description
         0       4       initial header
+
+Writes may not wrap around the end of hub RAM. The requested write must be
+entirely within the allowed range or it will not be performed.
 
 A single write command can be considered atomic since the data is included in
 a packet that is fully received into a buffer and checked for errors before
@@ -135,6 +163,9 @@ Response payload, 4 to 4+count bytes:
 
 readHubStr is like readHub, except it stops after the first 0x00 is found.
 
+Reads may not wrap around the end of hub RAM. The requested read must be
+entirely within the allowed range or it will not be performed.
+
 
 getSerialTimings
 ================
@@ -143,16 +174,25 @@ Command payload, 4 bytes:
         pos     len     description
         0       4       initial header
 
-Response payload, 32 bytes:
+Response payload, 5+ bytes:
         pos     len     description
         0       4       initial header
-        4       4       bitPeriod0
-        8       4       bitPeriod1
-        12      4       startBitWait
-        16      4       stopBitDuration
-        20      4       interbyteTimeout
-        24      4       recoveryTime
-        28      4       breakMultiple
+        4       1       format
+        5+      -       varies
+
+The format field allows for implementation changes.
+
+Format 0 response payload, 36 bytes:
+        pos     len     description
+        ...     ...     ...
+        5       3       padding, undefined values
+        8       4       bitPeriod0
+        12      4       bitPeriod1
+        16      4       startBitWait
+        20      4       stopBitDuration
+        24      4       interbyteTimeout
+        28      4       recoveryTime
+        32      4       breakMultiple
 
 All timings are in system clocks except breakMultiple, which is the number of
 recoveryTime intervals that the rx line must be continuously low before a break
@@ -162,16 +202,23 @@ condition is detected.
 setSerialTimings
 ================
 
-Command payload, 32 bytes:
+Command payload, 5+ bytes:
         pos     len     description
         0       4       initial header
-        4       4       bitPeriod0
-        8       4       bitPeriod1
-        12      4       startBitWait
-        16      4       stopBitDuration
-        20      4       interbyteTimeout
-        24      4       recoveryTime
-        28      4       breakMultiple
+        4       1       format
+        5+      -       varies
+
+Format 0 command payload, 36 bytes:
+        pos     len     description
+        ...     ...     ...
+        5       3       padding, undefined values
+        8       4       bitPeriod0
+        12      4       bitPeriod1
+        16      4       startBitWait
+        20      4       stopBitDuration
+        24      4       interbyteTimeout
+        28      4       recoveryTime
+        32      4       breakMultiple
 
 Response payload, 4 bytes:
         pos     len     description
@@ -232,4 +279,5 @@ code be executed.
 Execution starts at the beginning of the PASM code.
 
 If a response is returned it must begin with the standard initial header.
+
 

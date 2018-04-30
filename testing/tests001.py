@@ -1,5 +1,5 @@
 # tests001.py
-# 29 April 2018
+# 30 April 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -25,6 +25,7 @@ serial_port_name = sys.argv[1]
 REF_CLKFREQ = 80000000
 INIT_BAUD = 115200
 LOWER_BAUD = 57600
+PAYLOAD_BUFF = 50*4     # from implementation
 
 start_time = time.perf_counter()
 
@@ -146,9 +147,9 @@ if par != par2:
 # There should be two getInfo commands visible using a logic analyzer (command payload
 #  is 0x70, 0x70, 0x00, 0x00) --  one for the first get_par call, and one for this get_info call.
 info = p.get_info(use_cached=False)
-if info.max_atomic_read != 196:
+if info.max_atomic_read != PAYLOAD_BUFF - 4:
     raise RuntimeError()
-if info.max_atomic_write != 192:
+if info.max_atomic_write != PAYLOAD_BUFF - 8:
     raise RuntimeError()
 if info.min_read_address != 0:
     raise RuntimeError()
@@ -158,10 +159,20 @@ if info.min_write_address != 0:
     raise RuntimeError()
 if info.max_write_address != 0xffff:
     raise RuntimeError()
-if info.available_commands_bitmask != 0x80ff:
+if info.identifier != 0:
     raise RuntimeError()
 if info.par != par:
     raise RuntimeError()
+if info.available_commands_bitmask != 0x80ff:
+    raise RuntimeError()
+if info.serial_timings_format != 0:
+    raise RuntimeError()
+if info.peekpoke_version != 2:
+    raise RuntimeError()
+
+print(" Info for instance at address 1:")
+print(" " + str(info))
+print(" ...")
 
 
 # === String Reading Tests ===

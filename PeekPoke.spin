@@ -1,8 +1,8 @@
 {
 ==================================================
 PeekPoke.spin
-Version 0.6.0 (alpha/experimental)
-29 April 2018
+Version 0.6.1 (alpha/experimental)
+30 April 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
@@ -49,6 +49,7 @@ Some must be called in a particular sequence.
     disableBreakDetection
     setReadRange(minAddr, maxAddr)
     setWriteRange(minAddr, maxAddr)
+    setIdentifier(identifier)
   
   If the recovery time is set, then setBreakThresholdInMS must be called afterwards
 in order to recalculate the break multiple, regardless if the threshold has changed.
@@ -57,6 +58,9 @@ in order to recalculate the break multiple, regardless if the threshold has chan
 minAddr must be less than maxAddr (no wrap around). Both endpoints are inclusive. The
 range of a remote command must be entirely within the allowed range or it will not be
 performed.
+
+  The identifier is a four byte constant that may be used to identify the project.
+The PC obtains its value using the getInfo command.
 
   Calling the above methods has no effect on already launched instances.
 
@@ -81,11 +85,9 @@ sending a command.
 
 con
 
-    { Compile-Time Constants 
-        The PeekPoke read commands could have a larger limit, but using a single PeekPoke max data size saves registers.}
+    { Compile-Time Constants }
     cNumPayloadRegisters        = 50                        'MUST be even
     cMaxPayloadSize             = 4*cNumPayloadRegisters
-    cMaxPeekPokeDataSize        = cMaxPayloadSize - 8       'limit based on writeHub command (worst-case)
     
     { Default Settings
         These settings may be changed before cog launch -- see Spin methods.
@@ -255,6 +257,9 @@ pub setWriteRange(__minAddr, __maxAddr)
     maxWriteAddr := __maxAddr
     writeAddrRange := (__maxAddr << 16) | __minAddr
 
+pub setIdentifier(__identifier)
+    identifier := __identifier
+
 pub start(__par)
     result := cognew(@Entry, __par) + 1
     waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
@@ -361,9 +366,9 @@ txMask                  long    |< cTxPin
 ppToken                 long    0                       'must be zero at launch
 
 kFFFF                   long    $ffff
-kOneInDField            long    $200
 kOneInDAndSFields       long    $201
-kFF00_0000              long    $ff00_0000
+'kOneInDField is incorporated in ppGetInfoBuffer
+kFF00_0000              long    $ff00_0000 
 
 
 { ReceiveCommand (jmp)
@@ -601,12 +606,6 @@ _RxStoreLeftovers       if_nz   mov         0-0, _rxLeftovers
                                 { At this point a valid packet has been received. It may not be addressed
                                     to this device, and it may be oversized (so its payload was not saved). }
 
-                                { PeekPoke: a valid packet was received, so save the current serial timings as the 
-                                    last known good timings. }
-                                movd        _Shift, #resetBitPeriod0
-                                movs        _Shift, #bitPeriod0
-                                call        #ShiftSeven
-
                                 { Check the address if not broadcast. }
 _RxCheckAddress         if_nz   cmp         _rxTmp_SH, #cAddress            wz      'z=0 addresses don't match; address (s-field) may be set before launch
                         if_nz   jmp         #ReceiveCommand                         '...valid packet, but not addressed to this device
@@ -635,7 +634,8 @@ _RxCheckUserPort                cmp         _rxPort_SH, #cUserPort          wz  
 { CrowAdmin
     CrowAdmin starts the process of responding to standard admin commands (port 0). The admin
   code assumes that sendBufferPointer points to Payload.
-    Supported admin commands: ping, echo/hostPresence, getDeviceInfo, getOpenPorts, and getPortInfo.
+    Supported admin commands: ping, echo/hostPresence, getOpenPorts, and getPortInfo.
+    PeekPoke modification: getDeviceInfo removed to free registers.
 }
 CrowAdmin
                                 { Crow admin command with no payload is ping. }
@@ -654,39 +654,13 @@ CrowAdmin
                                 mov         _admTmp, Payload
                                 shr         _admTmp, #16
                                 and         _admTmp, #$ff                   wz      'z=1 echo/hostPresence; masked since upper byte of Payload is unknown/undefined
-                        if_nz   max         _admTmp, #4                             'using fall-through for echo (z=1) -- messy, but saves an instruction
-                        if_nz   add         _admTmp, #:jumpTable-1                  'minus one used since echo/hostPresence isn't in table
-                        if_nz   jmp         _admTmp
+                        if_z    jmp         #SendResponse
+                                cmp         _admTmp, #2                     wz      'z=1 getOpenPorts
+                        if_z    jmp         #AdminGetOpenPorts             
+                                cmp         _admTmp, #3                     wz      'z=1 getPortInfo
+                        if_nz   jmp         #ReportCommandNotAvailable
 
-:jumpTable              if_nz   jmp         #AdminGetDeviceInfo                     '1 
-                        if_nz   jmp         #AdminGetOpenPorts                      '2
-                        if_nz   jmp         #AdminGetPortInfo                       '3
-                        if_nz   jmp         #ReportCommandNotAvailable              '4+ not available - using PeekPoke's report routine saves a register
-
-                            { fall through if z=1 (echo) }
-
-{ AdminGetOpenPorts (jmp, z=0), or echo (z=1)
-    Important: this routine assumes z=0 for its normal, specified behavior (sending a getOpenPorts response). If z=1
-  it just sends whatever response is already prepared, which is used for echo.
-    The response consists of six bytes: 0x43, 0x41, 0x02, 0x00, plus the user port and admin port 0.
-}
-AdminGetOpenPorts
-                        if_nz   andn        Payload, kFF00_0000                     'clear byte four, which is undefined
-_AdminOpenPortsList     if_nz   mov         Payload+1, #cUserPort                   's-field set before launch (admin port 0 gets set automatically)
-                        if_nz   mov         payloadSize, #6
-
-                                jmp         #SendResponse                           'this does double duty for echo (hostPresence goes back to ReceiveCommand w/o sending)
-
-
-{ AdminGetDeviceInfo (jmp)
-    This routine provides basic info about the Crow device. The response has already been prepared -- all we need to
-  do is direct sendBufferPointer to its location, and then remember to set the pointer back to Payload afterwards.
-}
-AdminGetDeviceInfo
-                                mov         sendBufferPointer, #getDeviceInfoBuffer
-                                mov         payloadSize, #9
-                                jmp         #SendResponseAndResetPointer
-
+                        { fall through to AdminGetPortInfo }
 
 { AdminGetPortInfo (jmp)
     The getPortInfo response returns information about a specific port.
@@ -715,13 +689,19 @@ _AdminCheckUserPort             cmp         _admTmp, #cUserPort             wz  
                                 jmp         #SendResponseAndResetPointer
 
 
+{ AdminGetOpenPorts (jmp)
+    The response consists of six bytes: 0x43, 0x41, 0x02, 0x00, plus the user port and admin port 0.
+}
+AdminGetOpenPorts
+                                andn        Payload, kFF00_0000                     'set byte four to 0x00 (format is list of open port numbers)
+_AdminOpenPortsList             mov         Payload+1, #cUserPort                   's-field set before launch (admin port 0 gets set automatically)
+                                mov         payloadSize, #6
+
+                                jmp         #SendResponse
+
+
 { The following buffers are prepared values for admin responses. If any of these buffers are changed
     remember to update the payload sizes in the above code. }
-
-getDeviceInfoBuffer
-long $0201_4143         'initial header (0x43, 0x41, 0x01), crowVersion = 2
-long $0000_0002 | (cMaxPayloadSize & $0700) | ((cMaxPayloadSize & $ff) << 16) | ((cMaxPayloadSize & $0700) << 16) 'crowAdminVersion = 2; start of max payload sizes
-long $0000_0000 | (cMaxPayloadSize & $ff)   'last byte of max payload sizes
 
 getPortInfoBuffer_Admin
 long $0303_4143         'initial header (0x43, 0x41, 0x03), port is open, serviceIdentifier included
@@ -945,6 +925,12 @@ UserCode
                                 cmp         scratch, k7070              wz      'z=0 bad fixed bytes
                     if_c_or_nz  jmp         #ReportUnknownCommandFormat
 
+                                { A PeekPoke command has been received (it may still have an invalid format), so save
+                                    the serial timings. This is done here to mirror the behavior of the host implementation. }
+                                movd        _Shift, #resetBitPeriod0
+                                movs        _Shift, #bitPeriod0
+                                call        #ShiftSeven
+
                                 { Extract the command code and jump to the routine. }
                                 mov         command, Payload
                                 shr         command, #24                wz      'z=1 code = 0 (getInfo)
@@ -1066,12 +1052,12 @@ maxWriteAddr    long    cMaxWriteAddr
 
 { getInfo }
 GetInfo                         mov         sendBufferPointer, #ppGetInfoBuffer
-                                mov         payloadSize, #24
+                                mov         payloadSize, #30
                                 jmp         #SendResponseAndResetPointer
 
-k7070
 ppGetInfoBuffer
-long $0000_7070                                             'initial header for getInfo also serves as header template
+k7070
+long $0000_7070                                             'initial header for getInfo; doubles as initial header template (k7070)
 long ((cMaxPayloadSize-8) << 16) | (cMaxPayloadSize-4)      'max read and write sizes determined by buffer size
 readAddrRange
 long (cMaxReadAddr << 16) | cMinReadAddr                    'min and max allowed read addresses; must be set by Spin code if ranges changed
@@ -1079,27 +1065,33 @@ writeAddrRange
 long (cMaxWriteAddr << 16) | cMinWriteAddr                  'min and max allowed write addresses; must be set by Spin code if ranges changed
 layoutID
 long $0000_0000                                             'todo: change when layout is finalized
+identifier
+long 0                                                      'identifying constant set by user
 parAndAvailability
-long $0000_0000                                             'par and command availability bitmask -- set by initializing code
+long $0000_0000                                             'par and command availability bitmask are set by initializing code
+kOneInDField
+long $0200                                                  'the serial timings format (0) and PeekPoke version (2); doubles as kOneInDField
 
 
 { getSerialTimings }
-GetSerialTimings                movd        _Shift, #Payload+1
+GetSerialTimings                mov         Payload+1, #0                       'format 0 plus padding
+                                movd        _Shift, #Payload+2
                                 movs        _Shift, #bitPeriod0
                                 call        #ShiftSeven
-                                mov         payloadSize, #32
+                                mov         payloadSize, #36
                                 jmp         #SendResponse
 
 
 { setSerialTimings }
-SetSerialTimings                cmp         payloadSize, #32            wz
+SetSerialTimings                cmp         payloadSize, #36            wz      'z=1 correct size
+                        if_nz   test        Payload+1, #$ff             wz      'z=1 correct format (0)
                         if_nz   jmp         #ReportInvalidCommand
 
                                 mov         payloadSize, #4
                                 call        #SendResponseAndReturn              'setting occurs after acknowledgement
 
                                 movd        _Shift, #bitPeriod0
-                                movs        _Shift, #Payload+1
+                                movs        _Shift, #Payload+2
                                 call        #ShiftSeven
 
                                 jmp         #ReceiveCommand
@@ -1167,6 +1159,17 @@ _Shift                          mov         0-0, 0-0
 ShiftSeven_ret                  ret
 
 
+{ Possibilities for freeing registers:
+    - remove echo/hostPresence (1 register); want to keep ping, getOpenPorts, and getPortInfo
+    - remove serviceIdentifiers to getPortInfo responses (3 registers per service)
+    - have counter B always running (3 registers)
+    - use a fall-through scheme with add instructions for reporting errors (1 or 2 registers?)
+    - use a single bit period (3 registers)
+}
+
+long 0[6] 'todo remove
+
+
 { ==========  Begin Res'd Variables and Temporaries ========== }
 
 fit 478 'On error: must reduce user code, payload buffer, or admin code.
@@ -1174,7 +1177,7 @@ org 478
 initShiftLimit          'The initialization shifting code will ignore registers at and above this address.
 
 { Reset Serial Timings
-    These store the last known good serial timings. They are set in PacketReceived.
+    These store the last known good serial timings.
 }
 resetBitPeriod0                 res     '478
 resetBitPeriod1                 res     '479    
