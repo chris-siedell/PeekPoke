@@ -1084,7 +1084,7 @@ GetSerialTimings                mov         Payload+1, #0                       
 
 { setSerialTimings }
 SetSerialTimings                cmp         payloadSize, #36            wz      'z=1 correct size
-                        if_nz   test        Payload+1, #$ff             wz      'z=1 correct format (0)
+                         if_z   test        Payload+1, #$ff             wz      'z=1 correct format (0)
                         if_nz   jmp         #ReportInvalidCommand
 
                                 mov         payloadSize, #4

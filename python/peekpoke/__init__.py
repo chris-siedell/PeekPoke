@@ -341,11 +341,11 @@ class PeekPoke():
                 details = {'command_code': command_code, 'hub_address': int.from_bytes(data[0:2], 'little'), 'count': int.from_bytes(data[2:4], 'little')}
                 # Add string version of command.
                 if command_code == 1:
-                    details['command'] = "readHub"
+                    details['command'] = "read_hub"
                 elif command_code == 2:
-                    details['command'] = "writeHub"
+                    details['command'] = "write_hub"
                 elif command_code == 3:
-                    details['command'] = "readHubStr"
+                    details['command'] = "read_hub_str"
                 # Add allowed ranges, if cached.
                 if self._info is not None:
                     if command_code == 1 or command_code == 3:
@@ -458,7 +458,7 @@ class PeekPoke():
         PeekPoke._verify_essentials(transaction, None, transaction.max_bytes + 4)
         rsp = transaction.response
         if transaction.max_bytes != 0 and len(rsp) == 4:
-            raise PeekPokeError(transaction, "The response unexpectedly did not return any data.")
+            raise PeekPokeError(transaction, "The read_hub_str response unexpectedly did not return any data.")
         return rsp[4:]
 
     @staticmethod
