@@ -1,5 +1,5 @@
 # PeekPoke
-# 28 April 2018
+# 29 April 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -11,7 +11,7 @@ from crow.host_serial import HostSerialSettings
 from crow.errors import ClientError
 
 
-__version__ = '0.5.0'
+__version__ = '0.6.0'
 VERSION = __version__
 
 
@@ -27,6 +27,7 @@ class PeekPoke():
         self._host = Host(serial_port_name)
         self._select_propcr_order()
         self._last_good_baudrate = None
+        self._info = None
         self._break_duration = 400
 
     @property
@@ -38,9 +39,11 @@ class PeekPoke():
         self._revert_propcr_order()
         try:
             self._host = Host(serial_port_name)
+            # Reset the following only on success.
+            self._last_good_baudrate = None
+            self._info = None
         finally:
             self._select_propcr_order()
-        self._last_good_baudrate = None
 
     @property
     def address(self):
@@ -54,22 +57,7 @@ class PeekPoke():
         self._address = address
         self._select_propcr_order()
         self._last_good_baudrate = None
-
-    # The save and revert technique being used here can 'fix' the default propcr order.
-    #  The underlying settings object for the address will initially have propcr_order=None,
-    #  meaning that the default for the serial port should be used. If it was None when select
-    #  was called, then when revert is called it will be set to whatever the default was when
-    #  select was previously called.
-    # I don't think this will be a problem in practice.
-
-    def _revert_propcr_order(self):
-        # Call before the host or address will change.
-        self._host.serial_port.set_propcr_order(self._address, self._prev_propcr_order)
-
-    def _select_propcr_order(self):
-        # Call after the host or address has changed.
-        self._prev_propcr_order = self._host.serial_port.get_propcr_order(self._address)
-        self._host.serial_port.set_propcr_order(self._address, True)
+        self._info = None
 
     @property
     def port(self):
@@ -93,10 +81,11 @@ class PeekPoke():
     # Hub Memory: Binary Data Methods
 
     def get_bytes(self, hub_address, count, *, atomic=False):
-        PeekPoke._verify_hub_args(hub_address, count, True, atomic)
+        self._verify_hub_args(hub_address, count, True, atomic)
+        info = self.get_info()
         result = bytearray()
         while count > 0:
-            atomic_count = min(count, PeekPoke.MAX_ATOMIC_READ)
+            atomic_count = min(count, info.max_atomic_read)
             count -= atomic_count
             result += self._read_hub(hub_address, atomic_count)
             hub_address = (hub_address + atomic_count)%65536
@@ -104,10 +93,11 @@ class PeekPoke():
 
     def set_bytes(self, hub_address, data, *, atomic=False):
         count = len(data)
-        PeekPoke._verify_hub_args(hub_address, count, False, atomic)
+        self._verify_hub_args(hub_address, count, False, atomic)
+        info = self.get_info()
         index = 0
         while count > 0:
-            atomic_count = min(count, PeekPoke.MAX_ATOMIC_WRITE)
+            atomic_count = min(count, info.max_atomic_write)
             count -= atomic_count
             self._write_hub(hub_address, data[index:index+atomic_count])
             hub_address = (hub_address + atomic_count)%65536
@@ -130,11 +120,12 @@ class PeekPoke():
     # Hub Memory: String Methods
 
     def get_str(self, hub_address, max_bytes, *, encoding='latin_1', errors='replace', nul_terminated=True, atomic=False):
-        PeekPoke._verify_hub_args(hub_address, max_bytes, True, atomic)
+        self._verify_hub_args(hub_address, max_bytes, True, atomic)
+        info = self.get_info()
         result = bytearray()
         if nul_terminated:
             while max_bytes > 0:
-                atomic_max_bytes = min(max_bytes, PeekPoke.MAX_ATOMIC_READ)
+                atomic_max_bytes = min(max_bytes, info.max_atomic_read)
                 max_bytes -= atomic_max_bytes
                 result += self._read_hub_str(hub_address, atomic_max_bytes)
                 hub_address = (hub_address + atomic_max_bytes)%65536
@@ -142,7 +133,7 @@ class PeekPoke():
                     break
         else:
             while max_bytes > 0:
-                atomic_count = min(max_bytes, PeekPoke.MAX_ATOMIC_READ)
+                atomic_count = min(max_bytes, info.max_atomic_read)
                 max_bytes -= atomic_count
                 result += self._read_hub(hub_address, atomic_count)
                 hub_address = (hub_address + atomic_count)%65536
@@ -178,14 +169,14 @@ class PeekPoke():
 
     def get_int(self, hub_address, length, *, alignment='length', byteorder='little', signed=False):
         PeekPoke._verify_int_length(length)
-        PeekPoke._verify_hub_args(hub_address, length, True, True)
+        self._verify_hub_args(hub_address, length, True, True)
         PeekPoke._verify_int_alignment(hub_address, length, alignment)
         data = self._read_hub(hub_address, length)
         return int.from_bytes(data, byteorder, signed=signed)
 
     def set_int(self, hub_address, length, integer, *, alignment='length', byteorder='little', signed=False):
         PeekPoke._verify_int_length(length)
-        PeekPoke._verify_hub_args(hub_address, length, False, True)
+        self._verify_hub_args(hub_address, length, False, True)
         PeekPoke._verify_int_alignment(hub_address, length, alignment)
         data = integer.to_bytes(length, byteorder, signed=signed)
         self._write_hub(hub_address, data)
@@ -241,7 +232,7 @@ class PeekPoke():
         """Changes the local baudrate back to the last known good value, and sends a break condition to the Propeller to instruct it to do the same."""
         if self._last_good_baudrate is None:
             raise RuntimeError("Cannot revert the baudrate before there has been a successful PeekPoke transaction using the current serial port and address.")
-        self.baudrate = self._last_good_baudrate
+        self.baudrate = self._last_good_baudrate # do remote first in case of error
         self._host.serial_port.serial.send_break(self._break_duration)
 
 
@@ -276,9 +267,14 @@ class PeekPoke():
 
     # Miscellaneous
 
-    def get_par(self):
-        info = self._get_info()
+    def get_par(self, *, use_cached=True):
+        info = self.get_info(use_cached=use_cached)
         return info.par
+
+    def get_info(self, *, use_cached=True):
+        if not use_cached or self._info is None:
+            self._info = self._get_info()
+        return self._info
 
     def estimate_clkfreq(self):
         timings = self._get_serial_timings()
@@ -292,20 +288,20 @@ class PeekPoke():
         return PeekPoke._parse_get_info(transaction)
 
     def _read_hub(self, hub_address, count):
-        # It is assumed that hub_address is in [0, 65535] and count is in [0, MAX_ATOMIC_READ].
+        # It is assumed that hub_address is in [0, 65535] and count is in [0, max_atomic_read].
         cmd_data = hub_address.to_bytes(2, 'little') + count.to_bytes(2, 'little')
         transaction = self._send_command(1, cmd_data)
         transaction.count = count
         return PeekPoke._parse_read_hub(transaction)
 
     def _write_hub(self, hub_address, data):
-        # It is assumed that hub_address is in [0, 65535] and len(data) is in [0, MAX_ATOMIC_WRITE].
+        # It is assumed that hub_address is in [0, 65535] and len(data) is in [0, max_atomic_write].
         cmd_data = hub_address.to_bytes(2, 'little') + len(data).to_bytes(2, 'little') + data
         transaction = self._send_command(2, cmd_data)
         PeekPoke._verify_essentials(transaction, 4)
 
     def _read_hub_str(self, hub_address, max_bytes):
-        # It is assumed that hub_address is in [0, 65535] and count is in [0, MAX_ATOMIC_READ].
+        # It is assumed that hub_address is in [0, 65535] and count is in [0, max_atomic_read].
         cmd_data = hub_address.to_bytes(2, 'little') + max_bytes.to_bytes(2, 'little')
         transaction = self._send_command(3, cmd_data)
         transaction.max_bytes = max_bytes
@@ -334,23 +330,42 @@ class PeekPoke():
         return transaction
 
 
-    # Internal Static Helper Methods
+    # Internal Helper Methods
 
-    @staticmethod
-    def _verify_hub_args(hub_address, count, is_read, atomic):
+    def _verify_hub_args(self, hub_address, count, is_read, atomic):
         # Used by hub memory methods to verify arguments.
         if hub_address < 0 or hub_address > 65535:
             raise ValueError("The hub address must be 0 to 65535.")
         if atomic:
-            if is_read and count > PeekPoke.MAX_ATOMIC_READ:
-                raise ValueError("An atomic hub read may not request more than " + str(PeekPoke.MAX_ATOMIC_READ) + " bytes.")
-            if not is_read and count > PeekPoke.MAX_ATOMIC_WRITE:
-                raise ValueError("An atomic hub write may not exceed " + str(PeekPoke.MAX_ATOMIC_WRITE) + " bytes.")
+            info = self.get_info()
+            if is_read and count > info.max_atomic_read:
+                raise ValueError("An atomic hub read may not request more than " + str(info.max_atomic_read) + " bytes.")
+            if not is_read and count > info.max_atomic_write:
+                raise ValueError("An atomic hub write may not exceed " + str(info.max_atomic_write) + " bytes.")
         if count < 0 or count > 65536:
             if is_read:
                 raise ValueError("The hub read operation may request 0 to 65536 bytes.")
             else:
                 raise ValueError("Hub writes may not exceed 65536 bytes.")
+
+    # The save and revert technique being used here can 'fix' the default propcr order.
+    #  The underlying settings object for the address will initially have propcr_order=None,
+    #  meaning that the default for the serial port should be used. If it was None when select
+    #  was called, then when revert is called it will be set to whatever the default was when
+    #  select was previously called.
+    # I don't think this will be a problem in practice.
+
+    def _revert_propcr_order(self):
+        # Call before the host or address will change.
+        self._host.serial_port.set_propcr_order(self._address, self._prev_propcr_order)
+
+    def _select_propcr_order(self):
+        # Call after the host or address has changed.
+        self._prev_propcr_order = self._host.serial_port.get_propcr_order(self._address)
+        self._host.serial_port.set_propcr_order(self._address, True)
+
+
+    # Static Internal Helper Methods
 
     @staticmethod
     def _verify_int_length(length):
@@ -396,12 +411,8 @@ class PeekPoke():
 
     @staticmethod
     def _parse_get_info(transaction):
-        PeekPoke._verify_essentials(transaction, 10)
-        rsp = transaction.response
-        info = PeekPokeInfo()
-        info.layoutID = int.from_bytes(rsp[4:8], 'little')
-        info.par = int.from_bytes(rsp[8:10], 'little')
-        return info
+        PeekPoke._verify_essentials(transaction, 24)
+        return PeekPokeInfo(transaction.response)
 
     @staticmethod
     def _parse_read_hub(transaction):
@@ -432,12 +443,6 @@ class PeekPoke():
         return transaction.response[4:8]
 
 
-    # Constants From Propeller Implementation
-
-    MAX_ATOMIC_READ = 260
-    MAX_ATOMIC_WRITE = 256
-
-
 class PeekPokeError(ClientError):
     def __init__(self, transaction, message):
         super().__init__(transaction.address, transaction.port, message)
@@ -447,9 +452,16 @@ class PeekPokeError(ClientError):
 
 
 class PeekPokeInfo():
-    def __init__(self):
-        self.layoutID = None
-        self.par = None
+    def __init__(self, response):
+        self.max_atomic_read = int.from_bytes(response[4:6], 'little')
+        self.max_atomic_write = int.from_bytes(response[6:8], 'little')
+        self.min_read_address = int.from_bytes(response[8:10], 'little')
+        self.max_read_address = int.from_bytes(response[10:12], 'little')
+        self.min_write_address = int.from_bytes(response[12:14], 'little')
+        self.max_write_address = int.from_bytes(response[14:16], 'little')
+        self.layout_id = response[16:20]
+        self.par = int.from_bytes(response[20:22], 'little')
+        self.available_commands_bitmask = int.from_bytes(response[22:24], 'little')
 
 
 class SerialTimings():

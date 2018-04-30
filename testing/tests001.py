@@ -36,12 +36,10 @@ print(" Assumptions:")
 print("  - it is safe to send a break condition,")
 print("  - setup001.spin is running,")
 print("  - the reference values have not been overwritten,")
-print("  - all features besides payloadExec are enabled,")
-print("  - the PeekPoke service is at address " + str(p.address) + " and port " + str(p.port) + ",")
 print("  - the Propeller and the PC can communicate at " + str(INIT_BAUD) + " and " + str(LOWER_BAUD) + " bps,")
 print("  - the Propeller's clock frequency is " + str(REF_CLKFREQ) + " Hz.")
 print(" These tests do not overwrite the reference values.")
-print(" Testing should take about 14 seconds.")
+print(" Testing should take about 15 seconds.")
 print(" ...")
 
 
@@ -51,12 +49,12 @@ print(" ...")
 #  and that it is running a PeekPoke service on the expected Crow port.
 admin = CrowAdmin(serial_port_name, default_address=p.address)
 admin.ping()
-info = admin.get_port_info(p.port)
-if not info['is_open']:
+port_info = admin.get_port_info(p.port)
+if not port_info['is_open']:
     raise RuntimeError("The PeekPoke service port is closed.")
-if 'service_identifier' in info:
-    if info['service_identifier'] != "PeekPoke":
-        raise RuntimeError("There is an unexpected service at the PeekPoke port (" + info['service_identifier'] + ").")
+if 'service_identifier' in port_info:
+    if port_info['service_identifier'] != "PeekPoke":
+        raise RuntimeError("There is an unexpected service at the PeekPoke port (" + port_info['service_identifier'] + ").")
 else:
     raise RuntimeError("The service at the PeekPoke port unexpectedly does not have an identifier.")
 
@@ -130,7 +128,7 @@ if v != 0:
     raise RuntimeError()
 
 
-# === get_par Test ===
+# === get_par and get_info Tests ===
 
 # par points to the address table, which holds the addresses to various
 #  reference items in hub memory.
@@ -139,6 +137,31 @@ par = p.get_par()
 # get_addr obtains the address of the given item in the address table.
 def get_addr(index):
     return p.get_int(par + 2*index, 2)
+
+# This call should result in using a cached value (no command sent to Propeller).
+par2 = p.get_par()
+if par != par2:
+    raise RuntimeError()
+
+# There should be two getInfo commands visible using a logic analyzer (command payload
+#  is 0x70, 0x70, 0x00, 0x00) --  one for the first get_par call, and one for this get_info call.
+info = p.get_info(use_cached=False)
+if info.max_atomic_read != 196:
+    raise RuntimeError()
+if info.max_atomic_write != 192:
+    raise RuntimeError()
+if info.min_read_address != 0:
+    raise RuntimeError()
+if info.max_read_address != 0xffff:
+    raise RuntimeError()
+if info.min_write_address != 0:
+    raise RuntimeError()
+if info.max_write_address != 0xffff:
+    raise RuntimeError()
+if info.available_commands_bitmask != 0x80ff:
+    raise RuntimeError()
+if info.par != par:
+    raise RuntimeError()
 
 
 # === String Reading Tests ===
@@ -748,13 +771,13 @@ v = p.get_bytes(buff_addr+150, 200)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(PeekPoke.MAX_ATOMIC_WRITE)
+u = random_bytes(info.max_atomic_write)
 p.set_bytes(buff_addr, u, atomic=True)
 v = p.get_bytes(buff_addr, len(u), atomic=True)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(PeekPoke.MAX_ATOMIC_WRITE+1)
+u = random_bytes(info.max_atomic_write+1)
 try:
     p.set_bytes(buff_addr, u, atomic=True)
     raise RuntimeError()
@@ -767,13 +790,13 @@ v = p.get_bytes(buff_addr, len(u), atomic=True)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(PeekPoke.MAX_ATOMIC_READ)
+u = random_bytes(info.max_atomic_read)
 p.set_bytes(buff_addr, u)
 v = p.get_bytes(buff_addr, len(u), atomic=True)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(PeekPoke.MAX_ATOMIC_READ+1)
+u = random_bytes(info.max_atomic_read+1)
 p.set_bytes(buff_addr, u)
 try:
     v = p.get_bytes(buff_addr, len(u), atomic=True)

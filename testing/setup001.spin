@@ -53,6 +53,12 @@ pub main
 
     peekpoke.start(@addrTable)
 
+    'Instance at address 2 restricts ranges.
+    peekpoke.setAddress(2)
+    peekpoke.setReadRange(@buffer, @buffer + 3999)
+    peekpoke.setWriteRange(@buffer, @buffer + 2999)
+    peekpoke.start(@buffer)
+
 
 dat
 

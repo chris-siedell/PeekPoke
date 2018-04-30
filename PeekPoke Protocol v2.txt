@@ -1,6 +1,6 @@
 ======================================
-PeekPoke Protocol.txt
-28 April 2018
+PeekPoke Protocol v2.txt
+29 April 2018
 Chris Siedell
 http://siedell.com/projects/PeekPoke/
 ======================================
@@ -55,7 +55,9 @@ These are the command codes:
     6 - getToken
     7 - setToken
     8 - payloadExec
- 
+    9-14 - reserved
+    15 - reserved for indicating break detection support (see getInfo)
+
 
 getInfo
 =======
@@ -64,11 +66,23 @@ Command payload, 4 bytes:
         pos     len     description
         0       4       initial header
 
-Response payload, 10 bytes:
+Response payload, 24 bytes:
         pos     len     description
         0       4       initial header
-        4       4       implementation's layoutID (for payloadExec)
-        8       2       par
+        4       2       max single command read size
+        6       2       max single command write size
+        8       2       min allowed read address
+        10      2       max allowed read address
+        12      2       min allowed write address
+        14      2       max allowed write address
+        16      4       implementation's layoutID (for payloadExec)
+        20      2       par
+        22      2       available commands
+
+The available commands bitfield has bits set corresponding to the command
+codes. For example, if bit 2 is set then writeHub is available. Bits 9 to 14
+must always be set to 0 by devices implementing this version of PeekPoke. Bit
+15 indicates whether the device has break detection enabled.
 
 
 readHub

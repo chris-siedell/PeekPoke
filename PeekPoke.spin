@@ -1,7 +1,7 @@
 {
 ==================================================
 PeekPoke.spin
-Version 0.5.0 (alpha/experimental)
+Version 0.6.0 (alpha/experimental)
 29 April 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
@@ -17,8 +17,8 @@ disabled). By default, if a break condition is detected the serial parameters wi
 be reset to their last known good values.
 
   If the payloadExec feature is enabled PeekPoke will allow the PC to execute
-arbitrary code, effectively allowing any command that can be implemented in 64
-registers.
+arbitrary code, effectively allowing any command that can be implemented in the
+space available.
 
   By default, all features of PeekPoke except payloadExec are enabled. There are
 Spin methods that can enable and disable some features.
@@ -47,9 +47,16 @@ Some must be called in a particular sequence.
     disablePayloadExec
     enableBreakDetection
     disableBreakDetection
+    setReadRange(minAddr, maxAddr)
+    setWriteRange(minAddr, maxAddr)
   
   If the recovery time is set, then setBreakThresholdInMS must be called afterwards
 in order to recalculate the break multiple, regardless if the threshold has changed.
+
+  The addresses for the allowed read and write ranges must be in [0, 0xffff] and
+minAddr must be less than maxAddr (no wrap around). Both endpoints are inclusive. The
+range of a remote command must be entirely within the allowed range or it will not be
+performed.
 
   Calling the above methods has no effect on already launched instances.
 
@@ -73,6 +80,12 @@ sending a command.
 
 
 con
+
+    { Compile-Time Constants 
+        The PeekPoke read commands could have a larger limit, but using a single PeekPoke max data size saves registers.}
+    cNumPayloadRegisters        = 50                        'MUST be even
+    cMaxPayloadSize             = 4*cNumPayloadRegisters
+    cMaxPeekPokeDataSize        = cMaxPayloadSize - 8       'limit based on writeHub command (worst-case)
     
     { Default Settings
         These settings may be changed before cog launch -- see Spin methods.
@@ -152,10 +165,21 @@ con
     { PeekPoke Permissions
         All other commands are always enabled.
     } 
-    cEnableWriteHub         = 1
-    cEnableSetSerialTimings = 2
-    cEnablePayloadExec      = 4
-    cEnableBreakDetection   = 8
+    cEnableWriteHub         = |< 2
+    cEnableSetSerialTimings = |< 5
+    cEnablePayloadExec      = |< 8
+    cEnableBreakDetection   = |< 15
+    cEnableEverything       = $81ff
+
+    { PeekPoke Default Settings }
+    cMinReadAddr    = 0
+    cMaxReadAddr    = $ffff
+    cMinWriteAddr   = 0
+    cMaxWriteAddr   = $ffff
+    cPermissions    = cEnableEverything ^ cEnablePayloadExec
+
+    { PeekPoke Custom Error Constants }
+    cAddressForbidden   = 128
 
 
 var
@@ -221,6 +245,16 @@ pub enableBreakDetection
 pub disableBreakDetection
     initPermissions &= !cEnableBreakDetection
 
+pub setReadRange(__minAddr, __maxAddr)
+    minReadAddr := __minAddr
+    maxReadAddr := __maxAddr
+    readAddrRange := (__maxAddr << 16) | __minAddr
+    
+pub setWriteRange(__minAddr, __maxAddr)
+    minWriteAddr := __minAddr
+    maxWriteAddr := __maxAddr
+    writeAddrRange := (__maxAddr << 16) | __minAddr
+
 pub start(__par)
     result := cognew(@Entry, __par) + 1
     waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
@@ -279,22 +313,31 @@ initShift                       mov         initShiftLimit-1, initShiftLimit-1-(
                         if_c    movs        _JumpPayloadExec, #PayloadExec
                         if_nc   movs        _JumpPayloadExec, #ReportCommandNotAvailable
 
-                                test        initPermissions, #cEnableBreakDetection     wc
-                        if_c    movi        _RcvyLoopJump, #%111001_001                     'djnz - counts down to break detection
-                        if_nc   movi        _RcvyLoopJump, #%010111_000                     'jmp - never detects breaks
+                                test        initPermissions, initEnableBreakDetectionFlag   wc
+                        if_c    movi        _RcvyLoopJump, #%111001_001                         'djnz - counts down to break detection
+                        if_nc   movi        _RcvyLoopJump, #%010111_000                         'jmp - never detects breaks
+
+                                { Prepare the PeekPoke getInfo response. }
+
+                                mov         parAndAvailability, initPermissions
+                                shl         parAndAvailability, #16
+                                or          parAndAvailability, par
 
                                 jmp         #ReceiveCommand
 
-initPermissions         long    cEnableWriteHub | cEnableSetSerialTimings | cEnableBreakDetection
+
+initPermissions                 long    cPermissions
+
+initEnableBreakDetectionFlag    long    |< 15
 
 { initEnd is the last real (not reserved) register before initShiftStart. Its address is used by the initialization shifting code. }
 initEnd
-initOneInDAndSFields    long    $201    'the identical constant in the permanent code can't be used since it is not yet shifted when needed
+initOneInDAndSFields            long    $201    'the identical constant in the permanent code can't be used since it is not yet shifted when needed
 
 
-{ PeekPoke requires exactly 66 registers for the payload buffer due to assumptions made by payloadExec code. }
-fit 66 'On error: not enough room for init code.
-org 66
+fit cNumPayloadRegisters 'On error: not enough room for init code.
+org cNumPayloadRegisters
+
 
 { ==========  Begin PropCR Block  ========== }
 
@@ -315,15 +358,12 @@ breakMultiple           long    cBreakMultiple
 rxMask                  long    |< cRxPin               'rx pin also stored in rcvyLowCounterMode
 txMask                  long    |< cTxPin
 
-layoutID                long    0                       'todo: change when layout is finalized
 ppToken                 long    0                       'must be zero at launch
 
 kFFFF                   long    $ffff
 kOneInDField            long    $200
 kOneInDAndSFields       long    $201
-k7070                   long    $7070
 kFF00_0000              long    $ff00_0000
-
 
 
 { ReceiveCommand (jmp)
@@ -509,7 +549,7 @@ rxP1
                 if_nc_and_nz    mov         _rxNextAddr, #Payload               ' C - payload too big for buffer so keep rewriting first long (will report Crow error later)
 rxP2                    
                         if_z    subs        _rxOffset, #15                      'A - go to rxF16_C0 if done with chunk's payload
-maxPayloadSize                  long    264                                     ' B - (spacer nop) PeekPoke uses exactly 66 registers for its buffer
+maxPayloadSize                  long    cMaxPayloadSize & $7ff                  ' B - (spacer nop) payloads must be 2047 or less by Crow specification
                                 movd        _RxStoreLong, _rxNextAddr           ' C - prep to write next long to buffer
 rxP3                    
                         if_z    subs        _rxOffset, #18                      'A - go to rxF16_C0 if done with chunk's payload
@@ -621,8 +661,7 @@ CrowAdmin
 :jumpTable              if_nz   jmp         #AdminGetDeviceInfo                     '1 
                         if_nz   jmp         #AdminGetOpenPorts                      '2
                         if_nz   jmp         #AdminGetPortInfo                       '3
-                        if_nz   mov         Payload, #cCommandNotAvailable          '4+ not available
-                        if_nz   jmp         #SendCrowError
+                        if_nz   jmp         #ReportCommandNotAvailable              '4+ not available - using PeekPoke's report routine saves a register
 
                             { fall through if z=1 (echo) }
 
@@ -681,8 +720,8 @@ _AdminCheckUserPort             cmp         _admTmp, #cUserPort             wz  
 
 getDeviceInfoBuffer
 long $0201_4143         'initial header (0x43, 0x41, 0x01), crowVersion = 2
-long $0108_0102         'crowAdminVersion = 2; maxCommandPayloadSize = 264; maxResponsePayloadSize = 264 (carries over to next long)
-long $0000_0008         'last byte of max payload sizes
+long $0000_0002 | (cMaxPayloadSize & $0700) | ((cMaxPayloadSize & $ff) << 16) | ((cMaxPayloadSize & $0700) << 16) 'crowAdminVersion = 2; start of max payload sizes
+long $0000_0000 | (cMaxPayloadSize & $ff)   'last byte of max payload sizes
 
 getPortInfoBuffer_Admin
 long $0303_4143         'initial header (0x43, 0x41, 0x03), port is open, serviceIdentifier included
@@ -913,17 +952,23 @@ UserCode
                                 testn       command, #%11               wz      'z=1 code = 1, 2, or 3 (hub memory commands); using fall-through
                         if_nz   max         command, #9                         '9+ will result in CommandNotAvailable error
                         if_nz   add         command, #JumpTable-4               'jump table starts at command code 4
-                        if_nz   jmp         command
+                        if_nz   jmp         command                             'reminder: GetToken requires z=0 before jump
 
                         { fall through to HubMemoryCommand (z=1) }
 
-HubMemoryCommand                { All hub memory commands have address and count (numBytes) arguments. }
-                                cmp         payloadSize, #8             wc
-                        if_c    jmp         #ReportInvalidCommand
-                                mov         address, Payload+1
-                                and         address, kFFFF
-                                mov         numBytes, Payload+1
-                                shr         numBytes, #16
+HubMemoryCommand                { All hub memory commands have address and count (numBytes) arguments. 
+                                  Hub memory commands are not allowed to wrap around the end of the hub address
+                                    space. This restriction makes it easier to enforce the allowed ranges. }
+                                cmp         payloadSize, #8             wc      'c=1 not enough bytes for mandatory arguments
+                        if_nc   mov         address, Payload+1
+                        if_nc   and         address, kFFFF
+                        if_nc   mov         numBytes, Payload+1
+                        if_nc   shr         numBytes, #16
+                        if_nc   mov         lastAddress, address                'lastAddress will be used for verifying the range
+                        if_nc   add         lastAddress, numBytes
+                        if_nc   sub         lastAddress, #1
+                        if_nc   cmp         kFFFF, lastAddress          wc      'c=1 command would wrap around end of hub space, which is forbidden
+                        if_c    jmp         #ReportInvalidCommand 
 
                                 { Determine the number of longs necessary to completely cover the number of bytes (there
                                     may be remainder bytes in the last long). }
@@ -937,10 +982,15 @@ _JumpWriteHub           if_nc   jmp         #0-0                                
 
                         { fall through to _ReadHub, where z indicates the specific command }
 
-{ readHub, readHubStr }
-_ReadHub                        { readHub and readHubStr can request up to 260 bytes of data (4 bytes for initial header). }
-                                cmp         numBytes, #261              wc      'c=0 request too large
+{ readHub (z=1), readHubStr (z=0) }
+_ReadHub                        { readHub and readHubStr can request up to cMaxPayloadSize-4 bytes of data. }
+                                cmp         numBytes, #cMaxPayloadSize-4+1  wc  'c=0 request too large; the +1 makes it a strict inequality test
                         if_nc   jmp         #ReportInvalidCommand
+
+                                { Verify that the read request is within the allowed range. Assumes no wrap-around. }
+                                cmp         address, minReadAddr        wc      'c=1 read starts in forbidden area
+                        if_nc   cmp         maxReadAddr, lastAddress    wc      'c=1 read ends in forbidden area
+                        if_c    jmp         #ReportAddressForbidden
 
                         if_z    movs        :nulJump, #:innerJump               'z=1 readHub, so keep going after NUL found
                         if_nz   movs        :nulJump, #SendResponse             'z=0 readHubStr, so stop after NUL found
@@ -979,8 +1029,13 @@ _ReadHub                        { readHub and readHubStr can request up to 260 b
 _writeHub                       { writeHub should have 8 + count bytes in the payload. Note: count may be zero. }
                                 mov         scratch, #8
                                 add         scratch, numBytes
-                                cmp         payloadSize, scratch        wz
+                                cmp         payloadSize, scratch        wz      'z=0 wrong payload size
                         if_nz   jmp         #ReportInvalidCommand
+
+                                { Verify that the write is within the allowed range. Assumes no wrap-around. }
+                                cmp         address, minWriteAddr       wc      'c=1 write starts in forbidden area
+                        if_nc   cmp         maxWriteAddr, lastAddress   wc      'c=1 write ends in forbidden area
+                        if_c    jmp         #ReportAddressForbidden
 
                                 movs        :getLong, #Payload+2
 :outerLoop                      mov         ind, #4
@@ -998,11 +1053,34 @@ _writeHub                       { writeHub should have 8 + count bytes in the pa
                                 jmp         #SendResponse
 
 
+{ Hub Memory Command Ranges
+    If Spin code changes these limits then the values in the getInfo buffer will need to be changed as well.
+    The endpoints are inclusive.
+    Assumptions: min is always less than max, and both are in [0, $ffff].
+}
+minReadAddr     long    cMinReadAddr
+maxReadAddr     long    cMaxReadAddr
+minWriteAddr    long    cMinWriteAddr
+maxWriteAddr    long    cMaxWriteAddr
+
+
 { getInfo }
-GetInfo                         mov         Payload+1, layoutID
-                                mov         Payload+2, par
-                                mov         payloadSize, #10
-                                jmp         #SendResponse
+GetInfo                         mov         sendBufferPointer, #ppGetInfoBuffer
+                                mov         payloadSize, #24
+                                jmp         #SendResponseAndResetPointer
+
+k7070
+ppGetInfoBuffer
+long $0000_7070                                             'initial header for getInfo also serves as header template
+long ((cMaxPayloadSize-8) << 16) | (cMaxPayloadSize-4)      'max read and write sizes determined by buffer size
+readAddrRange
+long (cMaxReadAddr << 16) | cMinReadAddr                    'min and max allowed read addresses; must be set by Spin code if ranges changed
+writeAddrRange
+long (cMaxWriteAddr << 16) | cMinWriteAddr                  'min and max allowed write addresses; must be set by Spin code if ranges changed
+layoutID
+long $0000_0000                                             'todo: change when layout is finalized
+parAndAvailability
+long $0000_0000                                             'par and command availability bitmask -- set by initializing code
 
 
 { getSerialTimings }
@@ -1026,24 +1104,16 @@ SetSerialTimings                cmp         payloadSize, #32            wz
 
                                 jmp         #ReceiveCommand
 
-{ getToken }
-GetToken                        mov         Payload+1, ppToken
-                                mov         payloadSize, #8
-                                jmp         #SendResponse
-
-
-{ Note: a register could be freed by setting scratch=ppToken before the jump table
-    and then folding GetToken into SetToken. }
-
-
 { setToken }
-SetToken                        cmp         payloadSize, #8             wz
+SetToken                        cmp         payloadSize, #8             wz      'using z=1 to signify setToken later on
                         if_nz   jmp         #ReportInvalidCommand
 
                                 mov         scratch, Payload+1
-                                mov         Payload+1, ppToken
-                                mov         ppToken, scratch
+{ getToken, requires z=0 }
+GetToken                        mov         Payload+1, ppToken
+                        if_z    mov         ppToken, scratch                    'command is setToken if z=1, getToken if z=0 
 
+                                mov         payloadSize, #8
                                 jmp         #SendResponse
                                 
 
@@ -1077,6 +1147,13 @@ ReportCommandNotAvailable       mov         Payload, #cCommandNotAvailable
     The catch-all error for invalid commands (wrong size, request too large).
 }
 ReportInvalidCommand            mov         Payload, #cInvalidCommand
+                                jmp         #SendCrowError
+
+
+{ ReportAddressForbidden (jmp)
+    This is used specifically when a hub read or write request is not within the allowed range.
+}
+ReportAddressForbidden          mov         Payload, #cAddressForbidden
                                 jmp         #SendCrowError
 
 
@@ -1171,6 +1248,7 @@ _rcvyTmp
 _txRemaining
 _rxRemaining    res     '494
 
+lastAddress
 tmp9v
 _initCount
 _admTmp
