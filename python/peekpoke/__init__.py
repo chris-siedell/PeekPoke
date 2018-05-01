@@ -267,7 +267,7 @@ class PeekPoke():
         return PeekPoke._parse_token_command(transaction)
 
 
-    # Miscellaneous
+    # Miscellaneous Methods
 
     def get_par(self, *, use_cached=True):
         info = self.get_info(use_cached=use_cached)
@@ -391,7 +391,10 @@ class PeekPoke():
 
     def _revert_propcr_order(self):
         # Call before the host or address will change.
-        self._host.serial_port.set_propcr_order(self._address, self._prev_propcr_order)
+        # Reversion occurs only if there has not been a successful communication
+        #  with the host and address.
+        if self._last_good_baudrate is None:
+            self._host.serial_port.set_propcr_order(self._address, self._prev_propcr_order)
 
     def _select_propcr_order(self):
         # Call after the host or address has changed.
@@ -494,7 +497,11 @@ class PeekPokeError(ClientError):
 
 class PeekPokeInfo():
 
-    def __init__(self, response):
+    def __init__(self, response=None):
+        if response is not None:
+            self.set_from_response(response)
+
+    def set_from_response(self, response):
         self.max_atomic_read = int.from_bytes(response[4:6], 'little')
         self.max_atomic_write = int.from_bytes(response[6:8], 'little')
         self.min_read_address = int.from_bytes(response[8:10], 'little')

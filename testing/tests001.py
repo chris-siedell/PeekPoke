@@ -14,7 +14,10 @@ import sys
 import time
 import random
 from peekpoke import PeekPoke
+from peekpoke import PeekPokeInfo
 from crow.admin import CrowAdmin
+from crow.errors import NoResponseError
+from crow.errors import PortNotOpenError
 
 
 if len(sys.argv) < 2:
@@ -40,7 +43,7 @@ print("  - the reference values have not been overwritten,")
 print("  - the Propeller and the PC can communicate at " + str(INIT_BAUD) + " and " + str(LOWER_BAUD) + " bps,")
 print("  - the Propeller's clock frequency is " + str(REF_CLKFREQ) + " Hz.")
 print(" These tests do not overwrite the reference values.")
-print(" Testing should take about 15 seconds.")
+print(" Testing should take about 16+ seconds.")
 print(" ...")
 
 
@@ -129,50 +132,66 @@ if v != 0:
     raise RuntimeError()
 
 
-# === get_par and get_info Tests ===
+# === Miscellaneous Methods Tests ===
 
 # par points to the address table, which holds the addresses to various
 #  reference items in hub memory.
-par = p.get_par()
+addrTableAddr = p.get_par()
 
 # get_addr obtains the address of the given item in the address table.
 def get_addr(index):
-    return p.get_int(par + 2*index, 2)
+    return p.get_int(addrTableAddr + 2*index, 2)
+
+# This call should result in using a cached value (no command sent to Propeller).
+v = p.get_identifier()
+if v != 0:
+    raise RuntimeError()
 
 # This call should result in using a cached value (no command sent to Propeller).
 par2 = p.get_par()
-if par != par2:
+if addrTableAddr != par2:
     raise RuntimeError()
 
-# There should be two getInfo commands visible using a logic analyzer (command payload
+ref_info1 = PeekPokeInfo()
+ref_info1.min_read_address = 0
+ref_info1.max_read_address = 0xffff
+ref_info1.min_write_address = 0
+ref_info1.max_write_address = 0xffff
+ref_info1.identifier = 0
+ref_info1.par = addrTableAddr
+ref_info1.available_commands_bitmask = 0x80ff
+
+def verify_and_print_info(info, ref_info, address):
+    if info.max_atomic_read != PAYLOAD_BUFF - 4:
+        raise RuntimeError()
+    if info.max_atomic_write != PAYLOAD_BUFF - 8:
+        raise RuntimeError()
+    if info.min_read_address != ref_info.min_read_address:
+        raise RuntimeError()
+    if info.max_read_address != ref_info.max_read_address:
+        raise RuntimeError()
+    if info.min_write_address != ref_info.min_write_address:
+        raise RuntimeError()
+    if info.max_write_address != ref_info.max_write_address:
+        raise RuntimeError()
+    if info.identifier != ref_info.identifier:
+        raise RuntimeError()
+    if info.par != ref_info.par:
+        raise RuntimeError()
+    if info.available_commands_bitmask != ref_info.available_commands_bitmask:
+        raise RuntimeError()
+    if info.serial_timings_format != 0:
+        raise RuntimeError()
+    if info.peekpoke_version != 2:
+        raise RuntimeError()
+    print(" Info for instance at address " + str(address) + ":")
+    print(" " + str(info))
+    print(" ...")
+
+# After this call there should be two getInfo commands visible using a logic analyzer (command payload
 #  is 0x70, 0x70, 0x00, 0x00) --  one for the first get_par call, and one for this get_info call.
-info = p.get_info(use_cached=False)
-if info.max_atomic_read != PAYLOAD_BUFF - 4:
-    raise RuntimeError()
-if info.max_atomic_write != PAYLOAD_BUFF - 8:
-    raise RuntimeError()
-if info.min_read_address != 0:
-    raise RuntimeError()
-if info.max_read_address != 0xffff:
-    raise RuntimeError()
-if info.min_write_address != 0:
-    raise RuntimeError()
-if info.max_write_address != 0xffff:
-    raise RuntimeError()
-if info.identifier != 0:
-    raise RuntimeError()
-if info.par != par:
-    raise RuntimeError()
-if info.available_commands_bitmask != 0x80ff:
-    raise RuntimeError()
-if info.serial_timings_format != 0:
-    raise RuntimeError()
-if info.peekpoke_version != 2:
-    raise RuntimeError()
-
-print(" Info for instance at address 1:")
-print(" " + str(info))
-print(" ...")
+info1 = p.get_info(use_cached=False)
+verify_and_print_info(info1, ref_info1, 1)
 
 
 # === String Reading Tests ===
@@ -782,13 +801,13 @@ v = p.get_bytes(buff_addr+150, 200)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(info.max_atomic_write)
+u = random_bytes(info1.max_atomic_write)
 p.set_bytes(buff_addr, u, atomic=True)
 v = p.get_bytes(buff_addr, len(u), atomic=True)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(info.max_atomic_write+1)
+u = random_bytes(info1.max_atomic_write+1)
 try:
     p.set_bytes(buff_addr, u, atomic=True)
     raise RuntimeError()
@@ -801,13 +820,13 @@ v = p.get_bytes(buff_addr, len(u), atomic=True)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(info.max_atomic_read)
+u = random_bytes(info1.max_atomic_read)
 p.set_bytes(buff_addr, u)
 v = p.get_bytes(buff_addr, len(u), atomic=True)
 if v != u:
     raise RuntimeError()
 
-u = random_bytes(info.max_atomic_read+1)
+u = random_bytes(info1.max_atomic_read+1)
 p.set_bytes(buff_addr, u)
 try:
     v = p.get_bytes(buff_addr, len(u), atomic=True)
@@ -833,6 +852,151 @@ p.set_bytes(buff_addr, u)
 v = p.get_bytes(buff_addr, buff_size)
 if v != u:
     raise RuntimeError()
+
+
+# === get_info Tests for All Instances ===
+
+ref_info2 = PeekPokeInfo()
+ref_info2.min_read_address = buff_addr
+ref_info2.max_read_address = buff_addr + 3999
+ref_info2.min_write_address = buff_addr
+ref_info2.max_write_address = buff_addr + 2999
+ref_info2.identifier = 1
+ref_info2.par = buff_addr
+ref_info2.available_commands_bitmask = 0x80ff
+
+p.address = 2
+info2 = p.get_info()
+verify_and_print_info(info2, ref_info2, 2)
+
+ref_info3 = PeekPokeInfo()
+ref_info3.min_read_address = buff_addr
+ref_info3.max_read_address = buff_addr
+ref_info3.min_write_address = buff_addr+1
+ref_info3.max_write_address = buff_addr+1
+ref_info3.identifier = 0xffffffff
+ref_info3.par = buff_addr
+ref_info3.available_commands_bitmask = 0x80ff
+
+p.address = 3
+info3 = p.get_info()
+verify_and_print_info(info3, ref_info3, 3)
+
+ref_info4 = PeekPokeInfo()
+ref_info4.min_read_address = 0x8000
+ref_info4.max_read_address = 0xffff
+ref_info4.min_write_address = 0x8000
+ref_info4.max_write_address = 0xffff
+ref_info4.identifier = 0x7fffffff
+ref_info4.par = 0
+ref_info4.available_commands_bitmask = 0x00ff
+
+p.address = 4
+try:
+    info4 = p.get_info()
+    raise RuntimeError()
+except NoResponseError:
+    # expected since address 4 is using 57600 bps
+    pass
+p.baudrate = 57600
+try:
+    info4 = p.get_info()
+    raise RuntimeError()
+except PortNotOpenError:
+    # expected since port 200 was selected
+    pass
+p.port = 200
+info4 = p.get_info()
+verify_and_print_info(info4, ref_info4, 4)
+
+# Try creating another instance using optional arguments.
+p5 = PeekPoke(serial_port_name, address=5, port=255)
+
+ref_info5 = PeekPokeInfo()
+ref_info5.min_read_address = 0x8000
+ref_info5.max_read_address = 0xffff
+ref_info5.min_write_address = 0x8000
+ref_info5.max_write_address = 0xffff
+ref_info5.identifier = 0
+ref_info5.par = 2016
+ref_info5.available_commands_bitmask = 0x00db
+
+info5 = p5.get_info()
+verify_and_print_info(info5, ref_info5, 5)
+
+p6 = PeekPoke(serial_port_name, address=6)
+
+ref_info6 = PeekPokeInfo()
+ref_info6.min_read_address = 0x8000
+ref_info6.max_read_address = 0xffff
+ref_info6.min_write_address = 0x8000
+ref_info6.max_write_address = 0xffff
+ref_info6.identifier = 0xaabbccdd
+ref_info6.par = 0xfffc
+ref_info6.available_commands_bitmask = 0x80ff
+
+info6 = p6.get_info()
+verify_and_print_info(info6, ref_info6, 6)
+
+ref_info7 = PeekPokeInfo()
+ref_info7.min_read_address = 1
+ref_info7.max_read_address = 0x7fff
+ref_info7.min_write_address = 0x8000
+ref_info7.max_write_address = 0xffff
+ref_info7.identifier = 2018
+ref_info7.par = 0x8000
+ref_info7.available_commands_bitmask = 0x80ff
+
+p.address = 7
+p.port = 112
+info7 = p.get_info()
+verify_and_print_info(info7, ref_info7, 7)
+
+ref_info8 = PeekPokeInfo()
+ref_info8.min_read_address = 1
+ref_info8.max_read_address = 0x7fff
+ref_info8.min_write_address = 0x8000
+ref_info8.max_write_address = 0xffff
+ref_info8.identifier = 2018
+ref_info8.par = get_addr(22)
+ref_info8.available_commands_bitmask = 0x80ff
+
+p.address = 8
+info8 = p.get_info()
+verify_and_print_info(info8, ref_info8, 8)
+
+
+# === Verify Restricted Memory Op Ranges ===
+
+
+
+
+# === Verify Disabled/Enabled Features ===
+
+
+# Confirm address 6 can change baudrate.
+p6.switch_baudrate(57600, clkfreq=REF_CLKFREQ)
+# First byte of ROM is 0xff, last byte is 0x01.
+v = p6.get_int(0x8000, 1)
+if v != 0xff:
+    raise RuntimeError()
+v = p6.get_int(0xffff, 1)
+if v != 0x01:
+    raise RuntimeError()
+
+
+# === Serial Settings Persistence Test ===
+
+# After a successful communication the PropCR byte ordering -- which
+#  is not the default -- should 'stick', even when there is no object
+#  using that address (p5 uses 5, p6 uses 6, and p is currently using 8).
+# The same applies to the baudrate, even though not all addresses are
+#  using the same baudrate.
+# Using echo since it requires the correct PropCR byte ordering.
+if p.address != 8:
+    raise RuntimeError()
+for i in range(1, 9):
+    admin.echo(address=i, data=b'echo echo echo')
 
 
 # === All Done ===

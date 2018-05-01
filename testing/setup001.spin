@@ -22,8 +22,9 @@ obj
 var
 
     long buffer[1000]
-    word addrTable[22]
-    byte results[8]
+    long results[2]     'must be long-aligned
+    word addrTable[23]
+    
 
 
 pub main
@@ -50,44 +51,54 @@ pub main
     addrTable[19] := @wordList
     addrTable[20] := @longList
     addrTable[21] := @buffer
+    addrTable[22] := @results
 
-    results[0] := peekpoke.start(@addrTable)
+    results.byte[0] := peekpoke.new(@addrTable)
 
     peekpoke.setAddress(2)
+    peekpoke.setIdentifier(1)
     peekpoke.setReadRange(@buffer, @buffer + 3999)
     peekpoke.setWriteRange(@buffer, @buffer + 2999)
-    results[1] := peekpoke.start(@buffer)
+    results.byte[1] := peekpoke.new(@buffer)
 
     peekpoke.setAddress(3)
+    peekpoke.setIdentifier($ffff_ffff)
     peekpoke.setReadRange(@buffer, @buffer)
     peekpoke.setWriteRange(@buffer + 1, @buffer + 1)
-    results[2] := peekpoke.start(@buffer)
+    results.byte[2] := peekpoke.new(@buffer)
 
     peekpoke.setAddress(4)
+    peekpoke.setIdentifier($7fff_ffff)
+    peekpoke.setReadRange($8000, $ffff)
+    peekpoke.setWriteRange($8000, $ffff)
     peekpoke.setPort(200)
     peekpoke.setBaudrate(57600)
     peekpoke.disableBreakDetection
-    results[3] := peekpoke.start(0)
+    results.byte[3] := peekpoke.new(0)
 
     peekpoke.setAddress(5)
-    peekpoke.setPort(112)
+    peekpoke.setIdentifier(0)
+    peekpoke.setPort(255)
     peekpoke.setBaudrate(115200)
     peekpoke.disableWriteHub
     peekpoke.disableSetSerialTimings
-    results[4] := peekpoke.start(2018) 'expect 2016 due to zeroed low bits
+    results.byte[4] := peekpoke.new(2018) 'expect 2016 due to zeroed low bits
    
     peekpoke.setAddress(6)
+    peekpoke.setIdentifier($aabb_ccdd)
+    peekpoke.setPort(112)
     peekpoke.enableWriteHub
     peekpoke.enableSetSerialTimings
     peekpoke.enableBreakDetection 
-    results[5] := peekpoke.start($ffff) 'expect $fffc
+    results.byte[5] := peekpoke.new($ffff) 'expect $fffc
 
     peekpoke.setAddress(7)
-    peekpoke.setReadRange(0, $8fff)
-    results[6] := peekpoke.start(@buffer)
+    peekpoke.setIdentifier(2018)
+    peekpoke.setReadRange(1, $7fff)
+    results.byte[6] := peekpoke.new($8000)
 
     peekpoke.setAddress(8)
-    results[7] := peekpoke.start(0) 'should fail to launch, returning 0
+    results.byte[7] := peekpoke.new(0) 'should fail to launch, returning 0
     peekpoke.init(cogid, @results)
 
 

@@ -9,7 +9,7 @@ python: https://pypi.org/project/peekpoke/
 homepage: http://siedell.com/projects/PeekPoke/
 ==================================================
 
-  PeekPoke is a utility for reading and writing a Propeller's hub ram from a PC. It
+  PeekPoke is a utility for reading and writing a Propeller's hub RAM from a PC. It
 is entirely cog-contained after launch.
 
   PeekPoke allows the serial timings to be changed remotely (this feature can be
@@ -66,7 +66,7 @@ The PC obtains its value using the getInfo command.
 
   Launching an instance is done with one of two methods:
 
-    start(par) - returns cogID + 1 (will be 0 if no cog free)
+    new(par) - returns cogID + 1 (will be 0 if no cog free)
     init(cogID, par)
 
   The par argument will be passed to the launched instance using the PAR register.
@@ -184,10 +184,6 @@ con
     cAddressForbidden   = 128
 
 
-var
-    long __twoBitPeriod
-
-
 pub setPins(__rxPin, __txPin)
     rxMask := |< __rxPin
     txMask := |< __txPin
@@ -260,7 +256,7 @@ pub setWriteRange(__minAddr, __maxAddr)
 pub setIdentifier(__identifier)
     identifier := __identifier
 
-pub start(__par)
+pub new(__par)
     result := cognew(@Entry, __par) + 1
     waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
 
@@ -268,7 +264,11 @@ pub init(__cogid, __par)
     coginit(__cogid, @Entry, __par)
     waitcnt(cnt + 10000)                    'wait for cog loading to finish to protect settings of just launched cog
 
+
 dat
+
+__twoBitPeriod  long 0
+
 
 { ==========  Begin Payload Buffer, Initialization, and Entry  ========== }
 
@@ -1165,6 +1165,7 @@ ShiftSeven_ret                  ret
     - have counter B always running (3 registers)
     - use a fall-through scheme with add instructions for reporting errors (1 or 2 registers?)
     - use a single bit period (3 registers)
+    - remove break detection and baudrate reversion (~16 registers)
 }
 
 long 0[6] 'todo remove
