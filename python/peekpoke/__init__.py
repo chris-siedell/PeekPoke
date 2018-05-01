@@ -1,10 +1,14 @@
 # PeekPoke
-# 30 April 2018
+# 1 May 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
 # homepage: http://siedell.com/projects/PeekPoke/
 
+
+# todo: enforce more local checks and make baudrate behavior 
+#       smarter by using cached device info 
+# todo: revise if break callbacks added to Crow host
 
 from crow.host import Host
 from crow.host_serial import HostSerialSettings
@@ -70,6 +74,7 @@ class PeekPoke():
         if port < 0 or port > 255:
             raise ValueError("The port must be 0 to 255.")
         self._port = port
+        self._info = None
 
     @property
     def baudrate(self):
@@ -116,6 +121,7 @@ class PeekPoke():
                 n = min(pattern_len, num_bytes-index)
                 data[index:index+n] = pattern[0:n]
                 index += n
+        # set_bytes will verify hub args.
         self.set_bytes(hub_address, data, atomic=atomic)
 
 
@@ -164,6 +170,7 @@ class PeekPoke():
                     data = data[0:max_bytes]
                 else:
                     raise ValueError("The encoded string size (" + str(len(data)) + ") exceeds the max_bytes limit (" + str(max_bytes) + ").")
+        # set_bytes will verify hub args.
         self.set_bytes(hub_address, data, atomic=atomic)
 
 
@@ -215,10 +222,10 @@ class PeekPoke():
                 clkfreq = int.from_bytes(self._read_hub(0, 4), 'little')
             else:
                 clkfreq = self.estimate_clkfreq()
-        timings = SerialTimings()
         two_bit_period = int((2 * clkfreq) / baudrate)
         if two_bit_period < 52:
             raise ValueError("A baudrate of " + str(baudrate) + " bps is too fast given a clkfreq of " + str(clkfreq) + " MHz.")
+        timings = SerialTimings()
         timings.bit_period_0 = two_bit_period >> 1
         timings.bit_period_1 = timings.bit_period_0 + (two_bit_period & 1)
         timings.start_bit_wait = max((timings.bit_period_0 >> 1) - 10, 5)
@@ -234,7 +241,7 @@ class PeekPoke():
         """Changes the local baudrate back to the last known good value, and sends a break condition to the Propeller to instruct it to do the same."""
         if self._last_good_baudrate is None:
             raise RuntimeError("Cannot revert the baudrate before there has been a successful PeekPoke transaction using the current serial port and address.")
-        self.baudrate = self._last_good_baudrate # do remote first in case of error
+        self.baudrate = self._last_good_baudrate
         self._host.serial_port.serial.send_break(self._break_duration)
 
 
@@ -354,7 +361,7 @@ class PeekPoke():
                     elif command_code == 2:
                         details['min_write_address'] = self._info.min_write_address
                         details['max_write_address'] = self._info.max_write_address
-                raise AddressForbiddenError(self._address, self._port, details)
+                raise RestrictedAddressError(self._address, self._port, details)
             else:
                 raise
         transaction.command_code = command_code
@@ -480,7 +487,7 @@ class PeekPoke():
         return transaction.response[4:8]
 
 
-class AddressForbiddenError(InvalidCommandError):
+class RestrictedAddressError(InvalidCommandError):
     def __init__(self, address, port, details):
         super().__init__(address, port, details)
     def __str__(self):
@@ -516,7 +523,7 @@ class PeekPokeInfo():
         self.peekpoke_version = response[29]
 
     def __str__(self):
-        return "PeekPoke device info, max_atomic_read: " + str(self.max_atomic_read) + ", max_atomic_write: " + str(self.max_atomic_write) + ", min_read_address: " + str(self.min_read_address) + ", max_read_address: " + str(self.max_read_address) + ", min_write_address: " + str(self.min_write_address) + ", max_write_address: " +str(self.max_write_address) + ", layout_id: [" + self.layout_id.hex() + "], identifier: " + str(self.identifier) + ", par: " + str(self.par) + ", available_commands_bitmask: {:#4x}".format(self.available_commands_bitmask) + ", serial_timings_format: " + str(self.serial_timings_format) + ", peekpoke_version: " + str(self.peekpoke_version) + "."
+        return "Instance info, max_atomic_read: " + str(self.max_atomic_read) + ", max_atomic_write: " + str(self.max_atomic_write) + ", min_read_address: " + str(self.min_read_address) + ", max_read_address: " + str(self.max_read_address) + ", min_write_address: " + str(self.min_write_address) + ", max_write_address: " +str(self.max_write_address) + ", layout_id: [" + self.layout_id.hex() + "], identifier: " + str(self.identifier) + ", par: " + str(self.par) + ", available_commands_bitmask: {:#4x}".format(self.available_commands_bitmask) + ", serial_timings_format: " + str(self.serial_timings_format) + ", peekpoke_version: " + str(self.peekpoke_version) + "."
 
 
 class SerialTimings():

@@ -2,7 +2,7 @@
 ==================================================
 PeekPoke.spin
 Version 0.6.1 (alpha/experimental)
-30 April 2018
+1 May 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
@@ -86,7 +86,7 @@ sending a command.
 con
 
     { Compile-Time Constants }
-    cNumPayloadRegisters        = 50                        'MUST be even
+    cNumPayloadRegisters        = 56                        'MUST be even
     cMaxPayloadSize             = 4*cNumPayloadRegisters
     
     { Default Settings
@@ -1064,7 +1064,7 @@ long (cMaxReadAddr << 16) | cMinReadAddr                    'min and max allowed
 writeAddrRange
 long (cMaxWriteAddr << 16) | cMinWriteAddr                  'min and max allowed write addresses; must be set by Spin code if ranges changed
 layoutID
-long $0000_0000                                             'todo: change when layout is finalized
+long $ddcc_bbaa                                             'todo: change when layout is finalized
 identifier
 long 0                                                      'identifying constant set by user
 parAndAvailability
@@ -1167,8 +1167,6 @@ ShiftSeven_ret                  ret
     - use a single bit period (3 registers)
     - remove break detection and baudrate reversion (~16 registers)
 }
-
-long 0[6] 'todo remove
 
 
 { ==========  Begin Res'd Variables and Temporaries ========== }

@@ -1,6 +1,6 @@
 {
 setup001.spin
-30 April 2018
+1 May 2018
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
 homepage: http://siedell.com/projects/PeekPoke/
@@ -13,6 +13,9 @@ con
     _xinfreq = 5_000_000
     _clkmode = xtal1 + pll16x
 
+    cBuffSize = 1480            'must be divisible by 4, and at least 1480 (for gettysburg string + NUL)
+
+    cVersion = 1525211100       '1525211100 = 2018-05-01 21:45:00 UTC
 
 obj
     
@@ -21,9 +24,9 @@ obj
 
 var
 
-    long buffer[1000]
-    long results[2]     'must be long-aligned
-    word addrTable[23]
+    long buffer[cBuffSize/4]
+    long results[2]             'must be long-aligned
+    word addrTable[24]
     
 
 
@@ -52,13 +55,14 @@ pub main
     addrTable[20] := @longList
     addrTable[21] := @buffer
     addrTable[22] := @results
+    addrTable[23] := @version
 
     results.byte[0] := peekpoke.new(@addrTable)
 
     peekpoke.setAddress(2)
     peekpoke.setIdentifier(1)
-    peekpoke.setReadRange(@buffer, @buffer + 3999)
-    peekpoke.setWriteRange(@buffer, @buffer + 2999)
+    peekpoke.setReadRange(@buffer, @buffer + cBuffSize - 1)
+    peekpoke.setWriteRange(@buffer, @buffer + cBuffSize/2 - 1)
     results.byte[1] := peekpoke.new(@buffer)
 
     peekpoke.setAddress(3)
@@ -69,8 +73,8 @@ pub main
 
     peekpoke.setAddress(4)
     peekpoke.setIdentifier($7fff_ffff)
-    peekpoke.setReadRange($8000, $ffff)
-    peekpoke.setWriteRange($8000, $ffff)
+    peekpoke.setReadRange($0000, $ffff)
+    peekpoke.setWriteRange($0000, $ffff)
     peekpoke.setPort(200)
     peekpoke.setBaudrate(57600)
     peekpoke.disableBreakDetection
@@ -95,14 +99,18 @@ pub main
     peekpoke.setAddress(7)
     peekpoke.setIdentifier(2018)
     peekpoke.setReadRange(1, $7fff)
+    peekpoke.enablePayloadExec
     results.byte[6] := peekpoke.new($8000)
 
     peekpoke.setAddress(8)
+    peekpoke.disablePayloadExec
     results.byte[7] := peekpoke.new(0) 'should fail to launch, returning 0
     peekpoke.init(cogid, @results)
 
 
 dat
+
+version     long    cVersion
 
 setupName   byte    "setup001", 0
 empty       byte    0

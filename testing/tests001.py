@@ -1,5 +1,5 @@
 # tests001.py
-# 30 April 2018
+# 1 May 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -12,12 +12,16 @@
 
 import sys
 import time
+import datetime
 import random
 from peekpoke import PeekPoke
 from peekpoke import PeekPokeInfo
+from peekpoke import RestrictedAddressError
 from crow.admin import CrowAdmin
 from crow.errors import NoResponseError
 from crow.errors import PortNotOpenError
+from crow.errors import InvalidCommandError
+from crow.errors import CommandNotAvailableError
 
 
 if len(sys.argv) < 2:
@@ -25,26 +29,37 @@ if len(sys.argv) < 2:
 
 serial_port_name = sys.argv[1]
 
+
+# These constants come from the PeekPoke.spin and setup001.spin.
 REF_CLKFREQ = 80000000
-INIT_BAUD = 115200
+HIGHER_BAUD = 115200
 LOWER_BAUD = 57600
-PAYLOAD_BUFF = 50*4     # from implementation
+PAYLOAD_BUFF = 4*56
+BUFF_SIZE = 1480
+MIN_VERSION = 1525211100
 
-start_time = time.perf_counter()
 
-p = PeekPoke(serial_port_name)
+def str_from_version(version):
+    return datetime.datetime.utcfromtimestamp(version).strftime('%Y-%m-%d %H:%M:%S') + " UTC"
 
-print("PeekPoke Tests 001")
+
+print("PeekPoke Tests 001, 1 May 2018")
 print(" Serial port: " + serial_port_name)
 print(" Assumptions:")
 print("  - it is safe to send a break condition,")
 print("  - setup001.spin is running,")
+print("  - setup001's version is at least " + str(MIN_VERSION) + " (" + str_from_version(MIN_VERSION) + "),")
 print("  - the reference values have not been overwritten,")
-print("  - the Propeller and the PC can communicate at " + str(INIT_BAUD) + " and " + str(LOWER_BAUD) + " bps,")
+print("  - the Propeller and the PC can communicate at " + str(HIGHER_BAUD) + " and " + str(LOWER_BAUD) + " bps,")
 print("  - the Propeller's clock frequency is " + str(REF_CLKFREQ) + " Hz.")
+print(" If a previous test failed it may be necessary to reboot the Propeller.")
 print(" These tests do not overwrite the reference values.")
-print(" Testing should take about 16+ seconds.")
+print(" Testing should take about 0000 seconds.")
 print(" ...")
+
+start_time = time.perf_counter()
+
+p = PeekPoke(serial_port_name)
 
 
 # === Service Check ===
@@ -61,6 +76,28 @@ if 'service_identifier' in port_info:
         raise RuntimeError("There is an unexpected service at the PeekPoke port (" + port_info['service_identifier'] + ").")
 else:
     raise RuntimeError("The service at the PeekPoke port unexpectedly does not have an identifier.")
+
+
+# === Miscellaneous Methods Tests, Part 1 ===
+
+# par points to the address table, which holds the addresses to various
+#  reference items in hub memory.
+addrTableAddr = p.get_par()
+
+# get_addr obtains the address of the given item in the address table.
+def get_addr(index):
+    return p.get_int(addrTableAddr + 2*index, 2)
+
+
+# === Verify Min Version of setup001.spin is Running ===
+
+v = p.get_str(get_addr(0), 20)
+if v != "setup001":
+    raise RuntimeError("This test requires that the Propeller be running setup001.spin.")
+
+v = p.get_int(get_addr(23), 4)
+if v < MIN_VERSION:
+    raise RuntimeError("The Propeller is running an old version of setup001.spin. This test requires a version of " + str(MIN_VERSION) + " (" + str_from_version(MIN_VERSION) + ") or later, but the Propeller is running version " + str(v) + " (" + str_from_version(v) + ").") 
 
 
 # === Token Tests ===
@@ -110,7 +147,7 @@ try:
     p.set_token_bytes(b'01234')
     raise RuntimeError()
 except ValueError:
-    # expect ValueError since five byte provided
+    # expect ValueError since five bytes provided
     pass
 
 try:
@@ -132,15 +169,9 @@ if v != 0:
     raise RuntimeError()
 
 
-# === Miscellaneous Methods Tests ===
+# === Miscellaneous Methods Tests, Part 2  ===
 
-# par points to the address table, which holds the addresses to various
-#  reference items in hub memory.
-addrTableAddr = p.get_par()
-
-# get_addr obtains the address of the given item in the address table.
-def get_addr(index):
-    return p.get_int(addrTableAddr + 2*index, 2)
+est_clkfreq = p.estimate_clkfreq()
 
 # This call should result in using a cached value (no command sent to Propeller).
 v = p.get_identifier()
@@ -163,9 +194,9 @@ ref_info1.available_commands_bitmask = 0x80ff
 
 def verify_and_print_info(info, ref_info, address):
     if info.max_atomic_read != PAYLOAD_BUFF - 4:
-        raise RuntimeError()
+        raise RuntimeError("PAYLOAD_BUFF may need to be updated. It should be equal to cMaxPayloadSize in PeekPoke.spin.")
     if info.max_atomic_write != PAYLOAD_BUFF - 8:
-        raise RuntimeError()
+        raise RuntimeError("PAYLOAD_BUFF may need to be updated. It should be equal to cMaxPayloadSize in PeekPoke.spin.")
     if info.min_read_address != ref_info.min_read_address:
         raise RuntimeError()
     if info.max_read_address != ref_info.max_read_address:
@@ -201,11 +232,7 @@ v = p.get_str(65297, 30)
 if v != "Copyright 2005  Parallax, Inc.":
     raise RuntimeError()
 
-# Items at indices 0 to 12 in the address table are NUL-terminated strings.
-
-v = p.get_str(get_addr(0), 20)
-if v != "setup001":
-    raise RuntimeError("This test requires that the Propeller be running setup001.spin.")
+# Items at indices 1 to 12 in the address table are NUL-terminated strings.
 
 def verify_table_str(index, reference):
     v = p.get_str(get_addr(index), 5000)
@@ -371,8 +398,8 @@ if v != []:
 
 # === Baudrate Tests ===
 
-v = p.get_int(0, 4)
-if v != REF_CLKFREQ:
+hub_clkfreq = p.get_int(0, 4)
+if hub_clkfreq != REF_CLKFREQ:
     print("WARNING: REF_CLKFREQ (" + str(REF_CLKFREQ) + ") does not have the same value as the first long of hub memory (" + str(v) + "). This will probably cause problems.")
 
 # Use estimated clkfreq.
@@ -381,7 +408,7 @@ p.switch_baudrate(LOWER_BAUD)
 verify_table_str(11, gettysburg)
 
 # Use Spin's clkfreq (LONG[0]).
-p.switch_baudrate(INIT_BAUD, use_hub_clkfreq=True)
+p.switch_baudrate(HIGHER_BAUD, use_hub_clkfreq=True)
 verify_table_str(11, gettysburg)
 
 # Use explicit clkfreq.
@@ -389,13 +416,13 @@ p.switch_baudrate(LOWER_BAUD, clkfreq=REF_CLKFREQ)
 verify_table_str(11, gettysburg)
 
 # Baudrate reversion -- this sends a break condition.
-p.switch_baudrate(INIT_BAUD)
+p.switch_baudrate(HIGHER_BAUD)
 p.revert_baudrate()
 if p.baudrate != LOWER_BAUD:
     raise RuntimeError()
 verify_table_str(11, gettysburg)
 
-p.switch_baudrate(INIT_BAUD, clkfreq=REF_CLKFREQ)
+p.switch_baudrate(HIGHER_BAUD, clkfreq=REF_CLKFREQ)
 verify_table_str(11, gettysburg)
 
 
@@ -403,41 +430,40 @@ verify_table_str(11, gettysburg)
 
 # The buffer is 4000 bytes starting at a long-aligned address.
 buff_addr = get_addr(21)
-buff_size = 4000
 
 try:
-    p.fill_bytes(buff_addr, buff_size, b'')
+    p.fill_bytes(buff_addr, BUFF_SIZE, b'')
     raise RuntimeError()
 except ValueError:
     pass
 
-p.fill_bytes(buff_addr, buff_size, b'\x00')
-v = p.get_bytes(buff_addr, buff_size)
-if v != bytearray(buff_size):
+p.fill_bytes(buff_addr, BUFF_SIZE, b'\x00')
+v = p.get_bytes(buff_addr, BUFF_SIZE)
+if v != bytearray(BUFF_SIZE):
     raise RuntimeError()
 
 p.fill_bytes(buff_addr, 0, b'cat')
-v = p.get_str(buff_addr, buff_size)
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "":
     raise RuntimeError()
 
 p.fill_bytes(buff_addr, 2, b'cat')
-v = p.get_str(buff_addr, buff_size)
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "ca":
     raise RuntimeError()
 
 p.fill_bytes(buff_addr, 3, b'cat')
-v = p.get_str(buff_addr, buff_size)
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "cat":
     raise RuntimeError()
 
 p.fill_bytes(buff_addr, 10, b'cat')
-v = p.get_str(buff_addr, buff_size) 
+v = p.get_str(buff_addr, BUFF_SIZE) 
 if v != "catcatcatc":
     raise RuntimeError()
 
-p.fill_bytes(buff_addr, buff_size, b'\x55')
-v = p.get_bytes(buff_addr, buff_size)
+p.fill_bytes(buff_addr, BUFF_SIZE, b'\x55')
+v = p.get_bytes(buff_addr, BUFF_SIZE)
 for x in v:
     if x != 0x55:
         raise RuntimeError()
@@ -448,14 +474,14 @@ for x in v:
 # At this point the buffer is known to be filled with 0x55 bytes.
 
 # This call should write nothing to the buffer.
-p.set_str(buff_addr, buff_size, "", nul_terminated=False)
+p.set_str(buff_addr, BUFF_SIZE, "", nul_terminated=False)
 v = p.get_bytes(buff_addr, 2)
 if v != b'\x55\x55':
     raise RuntimeError()
 
 # This call should write just one NUL to the buffer.
-p.set_str(buff_addr, buff_size, "")
-v = p.get_str(buff_addr, buff_size)
+p.set_str(buff_addr, BUFF_SIZE, "")
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "":
     raise RuntimeError()
 v = p.get_bytes(buff_addr, 2)
@@ -463,8 +489,8 @@ if v != b'\x00\x55':
     raise RuntimeError()
 
 def test_set_str(string):
-    p.set_str(buff_addr, buff_size, string)
-    v = p.get_str(buff_addr, buff_size)
+    p.set_str(buff_addr, BUFF_SIZE, string)
+    v = p.get_str(buff_addr, BUFF_SIZE)
     if v != string:
         raise RuntimeError()
 
@@ -479,17 +505,17 @@ test_set_str("elephant")
 test_set_str("processor")
 test_set_str(gettysburg)
 
-p.set_str(buff_addr, buff_size, "library")
-p.set_str(buff_addr, buff_size, "cat", nul_terminated=False)
-v = p.get_str(buff_addr, buff_size)
+p.set_str(buff_addr, BUFF_SIZE, "library")
+p.set_str(buff_addr, BUFF_SIZE, "cat", nul_terminated=False)
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "catrary":
     raise RuntimeError()
 
 # This helper clears NULs that may complicate some tests.
 def write_dashes():
     filler_str = "-------------------"
-    p.set_str(buff_addr, buff_size, filler_str)
-    v = p.get_str(buff_addr, buff_size)
+    p.set_str(buff_addr, BUFF_SIZE, filler_str)
+    v = p.get_str(buff_addr, BUFF_SIZE)
     if v != filler_str:
         raise RuntimeError()
 
@@ -501,7 +527,7 @@ try:
 except ValueError:
     pass
 p.set_str(buff_addr, 1, "a", truncate=True)
-v = p.get_str(buff_addr, buff_size)
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "":
     raise RuntimeError()
 
@@ -520,14 +546,14 @@ try:
 except ValueError:
     pass
 p.set_str(buff_addr, 3, "cat", truncate=True)
-v = p.get_str(buff_addr, buff_size)
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "ca":
     raise RuntimeError()
 
 # Write "cat" with NUL terminator in exactly four bytes.
 write_dashes()
 p.set_str(buff_addr, 4, "cat")
-v = p.get_str(buff_addr, buff_size)
+v = p.get_str(buff_addr, BUFF_SIZE)
 if v != "cat":
     raise RuntimeError()
 
@@ -545,8 +571,8 @@ if v != "do-":
 
 # UTF-8 test.
 write_dashes()
-p.set_str(buff_addr+1, buff_size, "Ⓑ", encoding="utf_8")
-v = p.get_str(buff_addr+1, buff_size, encoding="utf_8")
+p.set_str(buff_addr+1, BUFF_SIZE, "Ⓑ", encoding="utf_8")
+v = p.get_str(buff_addr+1, BUFF_SIZE, encoding="utf_8")
 if v != "Ⓑ":
     raise RuntimeError()
 
@@ -781,9 +807,14 @@ def random_bytes(size):
         u[i] = random.randint(0, 255)
     return u
 
-u = bytearray(buff_size)
+# Write and read the entire reserved buffer. The timings
+#  will be used to display throughput at the end.
+u = bytearray(BUFF_SIZE)
+write_start = time.perf_counter()
 p.set_bytes(buff_addr, u)
-v = p.get_bytes(buff_addr, buff_size)
+read_start = write_end = time.perf_counter()
+v = p.get_bytes(buff_addr, BUFF_SIZE)
+read_end = time.perf_counter()
 if v != u:
     raise RuntimeError()
 
@@ -838,29 +869,33 @@ v = p.get_bytes(buff_addr, len(u))
 if v != u:
     raise RuntimeError()
 
-h = buff_size // 2
+h = BUFF_SIZE // 2
 r = random_bytes(h)
-u = r + bytearray(buff_size - h)
+u = r + bytearray(BUFF_SIZE - h)
 p.set_bytes(buff_addr, u)
-v = p.get_bytes(buff_addr, buff_size)
+v = p.get_bytes(buff_addr, BUFF_SIZE)
 if v != u:
     raise RuntimeError()
 
-r2 = random_bytes(buff_size - h)
+r2 = random_bytes(BUFF_SIZE - h)
 u = r + r2
 p.set_bytes(buff_addr, u)
-v = p.get_bytes(buff_addr, buff_size)
+v = p.get_bytes(buff_addr, BUFF_SIZE)
 if v != u:
     raise RuntimeError()
 
 
-# === get_info Tests for All Instances ===
+# === get_info Tests for All Remaining Instances ===
+
+# These should work even though the use_cached argument defaults
+#  to True. Every time the address or port changes the cached value
+#  should be invalidated.
 
 ref_info2 = PeekPokeInfo()
 ref_info2.min_read_address = buff_addr
-ref_info2.max_read_address = buff_addr + 3999
+ref_info2.max_read_address = buff_addr + BUFF_SIZE - 1
 ref_info2.min_write_address = buff_addr
-ref_info2.max_write_address = buff_addr + 2999
+ref_info2.max_write_address = buff_addr + BUFF_SIZE//2 - 1
 ref_info2.identifier = 1
 ref_info2.par = buff_addr
 ref_info2.available_commands_bitmask = 0x80ff
@@ -883,9 +918,9 @@ info3 = p.get_info()
 verify_and_print_info(info3, ref_info3, 3)
 
 ref_info4 = PeekPokeInfo()
-ref_info4.min_read_address = 0x8000
+ref_info4.min_read_address = 0x0000
 ref_info4.max_read_address = 0xffff
-ref_info4.min_write_address = 0x8000
+ref_info4.min_write_address = 0x0000
 ref_info4.max_write_address = 0xffff
 ref_info4.identifier = 0x7fffffff
 ref_info4.par = 0
@@ -896,9 +931,9 @@ try:
     info4 = p.get_info()
     raise RuntimeError()
 except NoResponseError:
-    # expected since address 4 is using 57600 bps
+    # expected since address 4 is using LOWER_BAUD
     pass
-p.baudrate = 57600
+p.baudrate = LOWER_BAUD
 try:
     info4 = p.get_info()
     raise RuntimeError()
@@ -913,9 +948,9 @@ verify_and_print_info(info4, ref_info4, 4)
 p5 = PeekPoke(serial_port_name, address=5, port=255)
 
 ref_info5 = PeekPokeInfo()
-ref_info5.min_read_address = 0x8000
+ref_info5.min_read_address = 0x0000
 ref_info5.max_read_address = 0xffff
-ref_info5.min_write_address = 0x8000
+ref_info5.min_write_address = 0x0000
 ref_info5.max_write_address = 0xffff
 ref_info5.identifier = 0
 ref_info5.par = 2016
@@ -927,9 +962,9 @@ verify_and_print_info(info5, ref_info5, 5)
 p6 = PeekPoke(serial_port_name, address=6)
 
 ref_info6 = PeekPokeInfo()
-ref_info6.min_read_address = 0x8000
+ref_info6.min_read_address = 0x0000
 ref_info6.max_read_address = 0xffff
-ref_info6.min_write_address = 0x8000
+ref_info6.min_write_address = 0x0000
 ref_info6.max_write_address = 0xffff
 ref_info6.identifier = 0xaabbccdd
 ref_info6.par = 0xfffc
@@ -941,11 +976,11 @@ verify_and_print_info(info6, ref_info6, 6)
 ref_info7 = PeekPokeInfo()
 ref_info7.min_read_address = 1
 ref_info7.max_read_address = 0x7fff
-ref_info7.min_write_address = 0x8000
+ref_info7.min_write_address = 0x0000
 ref_info7.max_write_address = 0xffff
 ref_info7.identifier = 2018
 ref_info7.par = 0x8000
-ref_info7.available_commands_bitmask = 0x80ff
+ref_info7.available_commands_bitmask = 0x81ff
 
 p.address = 7
 p.port = 112
@@ -955,7 +990,7 @@ verify_and_print_info(info7, ref_info7, 7)
 ref_info8 = PeekPokeInfo()
 ref_info8.min_read_address = 1
 ref_info8.max_read_address = 0x7fff
-ref_info8.min_write_address = 0x8000
+ref_info8.min_write_address = 0x0000
 ref_info8.max_write_address = 0xffff
 ref_info8.identifier = 2018
 ref_info8.par = get_addr(22)
@@ -968,20 +1003,285 @@ verify_and_print_info(info8, ref_info8, 8)
 
 # === Verify Restricted Memory Op Ranges ===
 
+# todo
 
 
+# === Verify No Wrap Around ===
 
-# === Verify Disabled/Enabled Features ===
+# Memory operations are not allowed to wrap aroung the end of the hub
+#  address space. This is enforced locally and remotely.
+p.address = 1
+v = p.get_int(65535, 1)
+if v != 1:
+    raise RuntimeError()
+v = p.get_int(65532, 4)
+if v != 24248068:
+    raise RuntimeError()
+# Effectively same as above but bypassing local checks -- this should work.
+t = p._host.send_command(address=p.address, port=p.port, payload=b'\x70\x70\x00\x01\xfc\xff\x04\x00')
+v = int.from_bytes(t.response[4:8], 'little')
+if v != 24248068:
+    raise RuntimeError()
+try:
+    v = p.get_int(65533, 4, alignment='byte')
+    raise RuntimeError()
+except ValueError:
+    # expected due to wrap around (local error)
+    pass
+try:
+    # Effectively same as above (address 65533 = 0xfffd) but bypassing 
+    #  local check -- this should fail.
+    t = p._host.send_command(address=p.address, port=p.port, payload=b'\x70\x70\x00\x01\xfd\xff\x04\x00')
+    raise RuntimeError()
+except InvalidCommandError:
+    # expected due to wrap around (remote error)
+    pass
+
+# This is effectively get_str(65535, 2), which should fail (bypasses local checks).
+try:
+    t = p._host.send_command(address=p.address, port=p.port, payload=b'\x70\x70\x00\x03\xff\xff\x02\x00')
+    raise RuntimeError()
+except InvalidCommandError:
+    # expected due to wrap around (remote error)
+    pass
+
+# This is effectively set_bytes(65535, 2), which should fail (bypasses local checks).
+try:
+    t = p._host.send_command(address=p.address, port=p.port, payload=b'\x70\x70\x00\x02\xff\xff\x02\x00\xaa\xbb')
+    raise RuntimeError()
+except InvalidCommandError:
+    # expected due to wrap around (remote error)
+    pass
+
+# Fundamentally, there are just three PeekPoke protocol hub memory operations (readHub, writeHub, and
+#  readHubStr), so the above exhausts the possibilities. In fact, all three ops share the same wrap
+#  around checking code.
+
+# All the local memory ops should use the same underlying method to enforce no wrapping (_verify_hub_args),
+#  so the following is just to verify that it is always being called.
+# Memory ops: get_bytes, set_bytes, fill_bytes, get_str, set_str, get_int, set_int, get_ints, set_ints.
+# todo: automate this visual inspection check
+print(" Nine error messages regarding wrap around should follow.")
+try:
+    p.get_bytes(65535, 2)
+    raise RuntimeError()
+except ValueError as e:
+    print(" 1. " + str(e))
+try:
+    p.set_bytes(65535, b'hi')
+    raise RuntimeError()
+except ValueError as e:
+    print(" 2. " + str(e))
+try:
+    p.fill_bytes(65535, 2, b'cat')
+    raise RuntimeError()
+except ValueError as e:
+    print(" 3. " + str(e))
+try:
+    p.get_str(65535, 2)
+    raise RuntimeError()
+except ValueError as e:
+    print(" 4. " + str(e))
+try:
+    p.set_str(65535, 2, "a")
+    raise RuntimeError()
+except ValueError as e:
+    print(" 5. " + str(e))
+try:
+    p.get_int(65535, 2, alignment='byte')
+    raise RuntimeError()
+except ValueError as e:
+    print(" 6. " + str(e))
+try:
+    p.set_int(65535, 2, 0xffff, alignment='byte')
+    raise RuntimeError()
+except ValueError as e:
+    print(" 7. " + str(e))
+try:
+    p.get_ints(65535, 1, 2)
+    raise RuntimeError()
+except ValueError as e:
+    print(" 8. " + str(e))
+try:
+    p.set_ints(65535, 1, [0xff, 0xff])
+    raise RuntimeError()
+except ValueError as e:
+    print(" 9. " + str(e))
+print(" ...")
 
 
-# Confirm address 6 can change baudrate.
-p6.switch_baudrate(57600, clkfreq=REF_CLKFREQ)
-# First byte of ROM is 0xff, last byte is 0x01.
+# === Verify Disabled/Enabled Break Detection ===
+
+# The instance at address 4 can change baudrate, but it has
+#  break detection disabled.
+# The instance at address 6 can change baudrate, and it has
+#  break detection enabled.
+
+# Confirm that address 4 can change baudrate, and then set it
+#  up for a break detection test.
+p.address = 4
+p.port = 200
+# Confirm at lower rate.
+if p.baudrate != LOWER_BAUD:
+    raise RuntimeError()
+v = p.get_int(0x8000, 1)
+if v != 0xff:
+    raise RuntimeError()
+# Go to higher rate and confirm.
+p.switch_baudrate(HIGHER_BAUD)
+if p.baudrate != HIGHER_BAUD:
+    raise RuntimeError()
+v = p.get_str(65297, 30)
+if v != "Copyright 2005  Parallax, Inc.":
+    raise RuntimeError()
+# Switch back to lower rate, but don't communicate.
+p.switch_baudrate(LOWER_BAUD, clkfreq=REF_CLKFREQ)
+if p.baudrate != LOWER_BAUD:
+    raise RuntimeError()
+
+# At this point the instance at address 4 has the HIGHER_BAUD
+#  timings as its last good values, but since break detection
+#  is disabled these values will not be used for baud reset.
+
+# Now confirm address 6 can change baudrate (this has to be
+#  done with a different local object).
+if p6.baudrate != HIGHER_BAUD:
+    raise RuntimeError()
+# Switch to lower rate.
+p6.switch_baudrate(LOWER_BAUD)
+if p6.baudrate != LOWER_BAUD:
+    raise RuntimeError()
 v = p6.get_int(0x8000, 1)
 if v != 0xff:
     raise RuntimeError()
+# Switch to higher rate.
+p6.switch_baudrate(HIGHER_BAUD, clkfreq=REF_CLKFREQ)
+if p6.baudrate != HIGHER_BAUD:
+    raise RuntimeError()
 v = p6.get_int(0xffff, 1)
 if v != 0x01:
+    raise RuntimeError()
+# Now switch to lower rate but don't communicate.
+p6.switch_baudrate(LOWER_BAUD)
+if p6.baudrate != LOWER_BAUD:
+    raise RuntimeError()
+
+# At this point the instance at address 6 also has HIGHER_BAUD
+#  timings as its last good values, and since break detection
+#  is enabled they should be applied when a break is sent.
+
+# Using object p to send the break.
+# (Currently, objects are not aware of breaks sent by other
+#  objects -- this may change in the future.)
+p.revert_baudrate()
+
+# Object p should now be at the higher rate, but since the instance
+#  at address 4 has break detection disabled it is still using
+#  the lower rate. Therefore communications should fail.
+if p.baudrate != HIGHER_BAUD:
+    raise RuntimeError()
+try:
+    v = p.get_int(0x8000, 1)
+    raise RuntimeError()
+except NoResponseError:
+    # expected since instance at address 4 still at lower rate
+    pass
+# Use lower baud and confirm that it works.
+p.baudrate = LOWER_BAUD
+v = p.get_int(0x8000, 1)
+if v != 0xff:
+    raise RuntimeError()
+
+# Object p6 was not aware a break was sent, so the local baudrate
+#  should still be the lower value.
+if p6.baudrate != LOWER_BAUD:
+    raise RuntimeError()
+# However, the instance at address 6 should be using the higher
+#  rate due to the break, so simply changing the local baudrate
+#  should restore communications.
+p6.baudrate = HIGHER_BAUD
+v = p6.get_str(65297, 30)
+if v != "Copyright 2005  Parallax, Inc.":
+    raise RuntimeError()
+
+
+# === Verify Disabled/Enabled Hub Writing ===
+
+# The instance at address 5 has disabled hub writing, while the
+#  instance at address 6 has enabled it.
+
+p.address = 6
+p.port = 112
+p.set_bytes(buff_addr, b'U')
+p.address = 5
+p.port = 255
+v = p.get_bytes(buff_addr, 1)
+if v != b'U':
+    raise RuntimeError()
+try:
+    p.set_bytes(buff_addr, b'V')
+    raise RuntimeError()
+except CommandNotAvailableError:
+    # expected, since address 5 has disabled hub writes
+    pass
+v = p.get_bytes(buff_addr, 1)
+if v != b'U':
+    raise RuntimeError()
+
+
+# === Verify Disabled/Enabled Baud Setting ===
+
+# todo
+
+
+# === Verify Disabled/Enabled PayloadExec ===
+
+# All instances except the one at address 7 should have
+#  payloadExec disabled.
+
+# This code block passes the minimum size test (>= 8), but
+#  since the layout_id is different from the implementation's
+#  it should never be executed. If payloadExec is enabled
+#  we'll get InvalidCommandError.
+block = bytearray(info1.layout_id) + bytearray(4)
+block[0] = block[0] ^ 1
+
+def verify_payloadExec_disabled(address, port):
+    p.address = address
+    p.port = port
+    try:
+        p._payload_exec(block)
+        raise RuntimeError()
+    except CommandNotAvailableError:
+        pass
+
+# Verify the disabled instances.
+verify_payloadExec_disabled(1, 112)
+verify_payloadExec_disabled(2, 112)
+verify_payloadExec_disabled(3, 112)
+verify_payloadExec_disabled(4, 200)
+verify_payloadExec_disabled(5, 255)
+verify_payloadExec_disabled(6, 112)
+verify_payloadExec_disabled(8, 112)
+
+# Verify that address 7 has enabled payloadExec.
+p.address = 7
+p.port = 112
+try:
+    p._payload_exec(block)
+    raise RuntimeError()
+except InvalidCommandError:
+    pass
+
+
+# === Confirm PeekPoke.spin's new Results ===
+
+# The return values are the new cog's ID + 1, so the
+#  last value should indicate failure (all cogs in use).
+p.address = 1
+p.port = 112
+v = p.get_ints(get_addr(22), 1, 8)
+if v != [2, 3, 4, 5, 6, 7, 8, 0]:
     raise RuntimeError()
 
 
@@ -989,12 +1289,11 @@ if v != 0x01:
 
 # After a successful communication the PropCR byte ordering -- which
 #  is not the default -- should 'stick', even when there is no object
-#  using that address (p5 uses 5, p6 uses 6, and p is currently using 8).
+#  using that address. This persistence should apply to all clients
+#  using the address and port, not just the PeekPoke object.
 # The same applies to the baudrate, even though not all addresses are
 #  using the same baudrate.
 # Using echo since it requires the correct PropCR byte ordering.
-if p.address != 8:
-    raise RuntimeError()
 for i in range(1, 9):
     admin.echo(address=i, data=b'echo echo echo')
 
@@ -1003,6 +1302,26 @@ for i in range(1, 9):
 
 end_time = time.perf_counter()
 
+read_dur = read_end - read_start
+write_dur = write_end - write_start
+
+read_rate = BUFF_SIZE / read_dur
+write_rate = BUFF_SIZE / write_dur
+
+theo_read_bytes = (HIGHER_BAUD / 10.0) * read_dur
+theo_write_bytes = (HIGHER_BAUD / 10.0) * write_dur
+
+read_pct = 100.0 * (BUFF_SIZE / theo_read_bytes)
+write_pct = 100.0 * (BUFF_SIZE / theo_write_bytes)
+
+print(" System clock frequencies...")
+print("  local value (REF_CLKFREQ): " + str(REF_CLKFREQ))
+print("         from hub (LONG[0]): " + str(hub_clkfreq))
+print("    from estimate_clkfreq(): {:#.1f}".format(est_clkfreq))
+print(" A single call to get_bytes for {0} bytes took {1:#.3f} seconds at {2} bps,".format(BUFF_SIZE, read_dur, HIGHER_BAUD))
+print("  giving a reading rate of {0:#.1f} bytes per second ({1:#.1f}% of baudrate max).".format(read_rate, read_pct))
+print(" A single call to set_bytes for {0} bytes took {1:#.3f} seconds at {2} bps,".format(BUFF_SIZE, write_dur, HIGHER_BAUD))
+print("  giving a writing rate of {0:#.1f} bytes per second ({1:#.1f}% of baudrate max).".format(write_rate, write_pct))
 print(" Testing actually took {0:#.1f} seconds.".format(end_time-start_time))
 print(" ALL TESTS PASSED")
 
