@@ -13,7 +13,7 @@ con
     _xinfreq = 5_000_000
     _clkmode = xtal1 + pll16x
 
-    cBuffSize = 1480            'must be divisible by 4, and at least 1480 (for gettysburg string + NUL)
+    cBuffSize = 4000            'must be divisible by 4, and at least 1480 (for gettysburg string + NUL)
 
     cVersion = 1525211100       '1525211100 = 2018-05-01 21:45:00 UTC
 
@@ -28,7 +28,6 @@ var
     long results[2]             'must be long-aligned
     word addrTable[24]
     
-
 
 pub main
 
@@ -103,6 +102,7 @@ pub main
     results.byte[6] := peekpoke.new($8000)
 
     peekpoke.setAddress(8)
+    peekpoke.setReadRange(0, $ffff)
     peekpoke.disablePayloadExec
     results.byte[7] := peekpoke.new(0) 'should fail to launch, returning 0
     peekpoke.init(cogid, @results)

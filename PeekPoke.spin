@@ -940,7 +940,7 @@ UserCode
                         if_nz   add         command, #JumpTable-4               'jump table starts at command code 4
                         if_nz   jmp         command                             'reminder: GetToken requires z=0 before jump
 
-                        { fall through to HubMemoryCommand (z=1) }
+                        { fall through to HubMemoryCommand) }
 
 HubMemoryCommand                { All hub memory commands have address and count (numBytes) arguments. 
                                   Hub memory commands are not allowed to wrap around the end of the hub address
@@ -949,10 +949,10 @@ HubMemoryCommand                { All hub memory commands have address and count
                         if_nc   mov         address, Payload+1
                         if_nc   and         address, kFFFF
                         if_nc   mov         numBytes, Payload+1
-                        if_nc   shr         numBytes, #16
+                        if_nc   shr         numBytes, #16               wz      'z=1 count is zero
                         if_nc   mov         lastAddress, address                'lastAddress will be used for verifying the range
                         if_nc   add         lastAddress, numBytes
-                        if_nc   sub         lastAddress, #1
+                if_nc_and_nz    sub         lastAddress, #1                     'don't allow lastAddress to come before address when count is zero
                         if_nc   cmp         kFFFF, lastAddress          wc      'c=1 command would wrap around end of hub space, which is forbidden
                         if_c    jmp         #ReportInvalidCommand 
 

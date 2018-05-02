@@ -35,7 +35,7 @@ REF_CLKFREQ = 80000000
 HIGHER_BAUD = 115200
 LOWER_BAUD = 57600
 PAYLOAD_BUFF = 4*56
-BUFF_SIZE = 1480
+BUFF_SIZE = 4000
 MIN_VERSION = 1525211100
 
 
@@ -54,7 +54,7 @@ print("  - the Propeller and the PC can communicate at " + str(HIGHER_BAUD) + " 
 print("  - the Propeller's clock frequency is " + str(REF_CLKFREQ) + " Hz.")
 print(" If a previous test failed it may be necessary to reboot the Propeller.")
 print(" These tests do not overwrite the reference values.")
-print(" Testing should take about 0000 seconds.")
+print(" Testing should take about 20 seconds.")
 print(" ...")
 
 start_time = time.perf_counter()
@@ -988,8 +988,8 @@ info7 = p.get_info()
 verify_and_print_info(info7, ref_info7, 7)
 
 ref_info8 = PeekPokeInfo()
-ref_info8.min_read_address = 1
-ref_info8.max_read_address = 0x7fff
+ref_info8.min_read_address = 0x0000
+ref_info8.max_read_address = 0xffff
 ref_info8.min_write_address = 0x0000
 ref_info8.max_write_address = 0xffff
 ref_info8.identifier = 2018
@@ -1001,9 +1001,292 @@ info8 = p.get_info()
 verify_and_print_info(info8, ref_info8, 8)
 
 
-# === Verify Restricted Memory Op Ranges ===
+# === Verify Restricted Hub Reads ===
 
-# todo
+# The instance at address 1 has a read range of 0
+#  to 0xffff -- in other words, all of RAM and ROM.
+# The baud switching tests proved that it could read
+#  the first long of RAM, so now just check the last byte
+#  of ROM.
+p.address = 1
+p.port = 112
+v = p.get_int(0xffff, 1)
+if v != 1:
+    raise RuntimeError()
+
+# The instance at address 2 limits reads to the buffer.
+# First, set up the buffer with known random data (using address 1), but
+#  set the first and last bytes to ascii chars.
+u = random_bytes(BUFF_SIZE)
+u[0] = 0x41             # 'A'
+u[BUFF_SIZE-1] = 0x42   # 'B'
+p.set_bytes(buff_addr, u)
+# Switch to address 2 and read the buffer.
+p.address = 2
+v = p.get_bytes(buff_addr, BUFF_SIZE)
+if v != u:
+    raise RuntimeError()
+# Now try to read just one more byte after the buffer -- this should fail.
+try:
+    v = p.get_bytes(buff_addr, BUFF_SIZE+1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now try to read just one more byte before the buffer.
+try:
+    v = p.get_bytes(buff_addr-1, BUFF_SIZE+1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now try to read a request that covers the buffer (starts before
+#  and ends after).
+try:
+    v = p.get_bytes(buff_addr-1, BUFF_SIZE+2)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now try to read a request that starts before the buffer but ends
+#  at the buffer start.
+try:
+    v = p.get_bytes(buff_addr-1, 2)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now try to read a request that starts at the last byte of the
+#  buffer but continues past.
+try:
+    v = p.get_bytes(buff_addr+BUFF_SIZE-1, 2)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now try to read a request that is entirely before the buffer.
+try:
+    v = p.get_bytes(buff_addr-1, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now try to read a request that is entirely after the buffer.
+try:
+    v = p.get_bytes(buff_addr+BUFF_SIZE, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now read a request entirely within the buffer (not including endpoints).
+v = p.get_int(buff_addr + 1, 1)
+if v != u[1]:
+    raise RuntimeError()
+# Now try a request before and not adjacent to the buffer.
+try:
+    v = p.get_bytes(0, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now try a request after and not adjacent to the buffer.
+try:
+    v = p.get_bytes(0xffff, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Now read just the endpoints, this time using get_str.
+# (Internally, the protocol has just two read commands -- readHub and readHubStr --
+#  and in the current implementation they use the same code for enforcing the read
+#  limits, so it is not really necessary to test them separately.)
+v = p.get_str(buff_addr, 1)
+if v != 'A':
+    raise RuntimeError()
+v = p.get_str(buff_addr+BUFF_SIZE-1, 1)
+if v != 'B':
+    raise RuntimeError()
+# Reading a string before or after the buffer should fail.
+try:
+    v = p.get_str(buff_addr-1, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+try:
+    v = p.get_str(buff_addr+BUFF_SIZE, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+
+# The instance at address 3 limits reads to just the
+#  first byte of the buffer.
+p.address = 3
+# Read the first byte of the buffer.
+v = p.get_str(buff_addr, 1)
+if v != 'A':
+    raise RuntimeError()
+# Try to read past.
+try:
+    v = p.get_str(buff_addr, 2)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Try to read byte before.
+try:
+    v = p.get_bytes(buff_addr-1, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Try to read byte after.
+try:
+    v = p.get_bytes(buff_addr+1, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Try a read request that covers the byte.
+try:
+    v = p.get_bytes(buff_addr-4, 8)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+
+# The instance at address 7 limits reads to [1, 0x7fff].
+p.address = 7
+# Try to read first byte of RAM.
+try:
+    v = p.get_bytes(0, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Try a read request that crosses the RAM/ROM boundary.
+try:
+    v = p.get_bytes(0x7fff, 2)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Try to read first byte of ROM.
+try:
+    v = p.get_bytes(0x8000, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Try to read last byte of ROM.
+try:
+    v = p.get_bytes(0xffff, 1)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Since the first byte of RAM is not allowed to be read, switching the
+#  baudrate using the hub value of clkfreq will not work.
+try:
+    p.switch_baudrate(LOWER_BAUD, use_hub_clkfreq=True)
+    raise RuntimeError()
+except RestrictedAddressError:
+    pass
+# Read the last byte of RAM (ignore the value).
+v = p.get_bytes(0x7fff, 1)
+# Check the first byte of the buffer.
+v = p.get_str(buff_addr, 1)
+if v != 'A':
+    raise RuntimeError()
+
+
+# === Verify Restricted Hub Writes ===
+
+# Internally, the PeekPoke protocol has just one hub writing command: writeHub.
+#  Therefore, any public command that sets hub bytes works equivalently for
+#  these tests.
+
+def write_first_and_last():
+    # Write first byte of RAM, remembering to restore its value.
+    v_prev = p.get_int(0, 1)
+    u = v_prev ^ 1
+    p.set_int(0, 1, u)
+    v = p.get_int(0, 1)
+    if v != u:
+        raise RuntimeError()
+    p.set_int(0, 1, v_prev)
+    v = p.get_int(0, 1)
+    if v != v_prev:
+        raise RuntimeError()
+    # Write last byte of ROM (restoring is unnecessary).
+    p.set_int(0xffff, 1, 0xff)
+
+# The instance at address 1 has write range of 0 to 0xffff -- so all of
+#  RAM/ROM is writable (obviously, writes to ROM won't accomplish anything).
+p.address = 1
+p.port = 112
+write_first_and_last()
+
+# The instance at address 2 limits writes to the first half of the buffer.
+p.address = 2
+count2 = BUFF_SIZE//2
+last_addr2 = buff_addr + count2 - 1
+
+def try_restricted_write(addr, count):
+    data = random_bytes(count)
+    try:
+        v = p.set_bytes(addr, data)
+        raise RuntimeError()
+    except RestrictedAddressError:
+        pass
+
+# Write all bytes in the allowed area.
+u = random_bytes(count2)
+p.set_bytes(buff_addr, u)
+v = p.get_bytes(buff_addr, count2)
+if v != u:
+    raise RuntimeError()
+# Write a byte contained within the allowed area,
+#  but not including the endpoints.
+p.set_bytes(buff_addr+4, b'H')
+v = p.get_bytes(buff_addr+4, 1)
+if v != b'H':
+    raise RuntimeError()
+# Write multiple bytes within the allowed area,
+#  but not including the endpoints.
+p.set_int(buff_addr+8, 4, 0x88664422)
+v = p.get_int(buff_addr+8, 4)
+if v != 0x88664422:
+    raise RuntimeError()
+# Write the first byte in the allowed area.
+p.set_bytes(buff_addr, b'X')
+v = p.get_bytes(buff_addr, 1)
+if v != b'X':
+    raise RuntimeError()
+# Write the last byte in the allowed area.
+p.set_bytes(last_addr2, b'Y')
+v = p. get_bytes(last_addr2, 1)
+if v != b'Y':
+    raise RuntimeError()
+# Now try permutations that should be prohibited.
+try_restricted_write(buff_addr, count2+1)
+try_restricted_write(buff_addr-1, count2+1)
+try_restricted_write(buff_addr-1, count2+2)
+try_restricted_write(buff_addr-1, 2)
+try_restricted_write(buff_addr-1, 1)
+try_restricted_write(last_addr2, 2)
+try_restricted_write(last_addr2+1, 1)
+try_restricted_write(0, 1)
+try_restricted_write(0xffff, 1)
+
+# The instance at address 3 limits writes to just one byte, at buff_addr+1.
+# Since that instance restricts reads to just the previous byte, we're
+#  using p6 (address 6) for checking values.
+p.address = 3
+# Write the byte.
+p.set_int(buff_addr+1, 1, 0x55)
+v = p6.get_int(buff_addr+1, 1)
+if v != 0x55:
+    raise RuntimeError()
+p.set_int(buff_addr+1, 1, 0xaa)
+v = p6.get_int(buff_addr+1, 1)
+if v != 0xaa:
+    raise RuntimeError()
+# Now try permutations that should be prohibited.
+try_restricted_write(buff_addr+1, 2)
+try_restricted_write(buff_addr, 2)
+try_restricted_write(buff_addr, 3)
+try_restricted_write(buff_addr, 1)
+try_restricted_write(buff_addr+2, 1)
+try_restricted_write(0, 1)
+try_restricted_write(0xffff, 1)
+
+# Instances at addresses 4 to 8 allow full hub writes, so just verify
+#  that the first and last bytes can be written.
+p.address = 8
+write_first_and_last()
 
 
 # === Verify No Wrap Around ===
@@ -1231,7 +1514,36 @@ if v != b'U':
 
 # === Verify Disabled/Enabled Baud Setting ===
 
-# todo
+# The instance at address 5 has disabled baud setting, while the
+#  instance at address 6 has enabled it.
+# We've already demonstrated that the instance at address 6 can change
+#  its baudrate in the "Verify Disabled/Enabled Break Detection"
+#  section, so all that's left is verifying that the instance at
+#  address 5 can not.
+
+# Check that address 5 is operating at the higher baudrate.
+p.address = 5
+p.port = 255
+if p.baudrate != HIGHER_BAUD:
+    raise RuntimeError()
+v = p.get_int(65535, 1)
+if v != 1:
+    raise RuntimeError()
+# Try changing it to the lower baudrate -- this should fail.
+try:
+    p.switch_baudrate(LOWER_BAUD)
+    raise RuntimeError()
+except CommandNotAvailableError:
+    # expected
+    pass
+# Confirm local baudrate is still the higher value, and that it
+#  works. The local value should change only if the command to
+#  change the serial timings was successful.
+if p.baudrate != HIGHER_BAUD:
+    raise RuntimeError()
+v = p.get_int(65535, 1)
+if v != 1:
+    raise RuntimeError()
 
 
 # === Verify Disabled/Enabled PayloadExec ===
