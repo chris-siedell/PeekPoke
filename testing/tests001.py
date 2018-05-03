@@ -1,5 +1,5 @@
 # tests001.py
-# 1 May 2018
+# 2 May 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -16,7 +16,7 @@ import datetime
 import random
 from peekpoke import PeekPoke
 from peekpoke import PeekPokeInfo
-from peekpoke import RestrictedAddressError
+from peekpoke import AccessError
 from crow.admin import CrowAdmin
 from crow.errors import NoResponseError
 from crow.errors import PortNotOpenError
@@ -43,7 +43,7 @@ def str_from_version(version):
     return datetime.datetime.utcfromtimestamp(version).strftime('%Y-%m-%d %H:%M:%S') + " UTC"
 
 
-print("PeekPoke Tests 001, 1 May 2018")
+print("PeekPoke Tests 001, 2 May 2018")
 print(" Serial port: " + serial_port_name)
 print(" Assumptions:")
 print("  - it is safe to send a break condition,")
@@ -1030,46 +1030,46 @@ if v != u:
 try:
     v = p.get_bytes(buff_addr, BUFF_SIZE+1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now try to read just one more byte before the buffer.
 try:
     v = p.get_bytes(buff_addr-1, BUFF_SIZE+1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now try to read a request that covers the buffer (starts before
 #  and ends after).
 try:
     v = p.get_bytes(buff_addr-1, BUFF_SIZE+2)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now try to read a request that starts before the buffer but ends
 #  at the buffer start.
 try:
     v = p.get_bytes(buff_addr-1, 2)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now try to read a request that starts at the last byte of the
 #  buffer but continues past.
 try:
     v = p.get_bytes(buff_addr+BUFF_SIZE-1, 2)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now try to read a request that is entirely before the buffer.
 try:
     v = p.get_bytes(buff_addr-1, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now try to read a request that is entirely after the buffer.
 try:
     v = p.get_bytes(buff_addr+BUFF_SIZE, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now read a request entirely within the buffer (not including endpoints).
 v = p.get_int(buff_addr + 1, 1)
@@ -1079,13 +1079,13 @@ if v != u[1]:
 try:
     v = p.get_bytes(0, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now try a request after and not adjacent to the buffer.
 try:
     v = p.get_bytes(0xffff, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Now read just the endpoints, this time using get_str.
 # (Internally, the protocol has just two read commands -- readHub and readHubStr --
@@ -1101,12 +1101,12 @@ if v != 'B':
 try:
     v = p.get_str(buff_addr-1, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 try:
     v = p.get_str(buff_addr+BUFF_SIZE, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 
 # The instance at address 3 limits reads to just the
@@ -1120,25 +1120,25 @@ if v != 'A':
 try:
     v = p.get_str(buff_addr, 2)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Try to read byte before.
 try:
     v = p.get_bytes(buff_addr-1, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Try to read byte after.
 try:
     v = p.get_bytes(buff_addr+1, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Try a read request that covers the byte.
 try:
     v = p.get_bytes(buff_addr-4, 8)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 
 # The instance at address 7 limits reads to [1, 0x7fff].
@@ -1147,32 +1147,32 @@ p.address = 7
 try:
     v = p.get_bytes(0, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Try a read request that crosses the RAM/ROM boundary.
 try:
     v = p.get_bytes(0x7fff, 2)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Try to read first byte of ROM.
 try:
     v = p.get_bytes(0x8000, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Try to read last byte of ROM.
 try:
     v = p.get_bytes(0xffff, 1)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Since the first byte of RAM is not allowed to be read, switching the
 #  baudrate using the hub value of clkfreq will not work.
 try:
     p.switch_baudrate(LOWER_BAUD, use_hub_clkfreq=True)
     raise RuntimeError()
-except RestrictedAddressError:
+except AccessError:
     pass
 # Read the last byte of RAM (ignore the value).
 v = p.get_bytes(0x7fff, 1)
@@ -1219,7 +1219,7 @@ def try_restricted_write(addr, count):
     try:
         v = p.set_bytes(addr, data)
         raise RuntimeError()
-    except RestrictedAddressError:
+    except AccessError:
         pass
 
 # Write all bytes in the allowed area.

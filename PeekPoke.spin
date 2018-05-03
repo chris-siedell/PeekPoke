@@ -1,8 +1,8 @@
 {
 ==================================================
 PeekPoke.spin
-Version 0.6.1 (alpha/experimental)
-1 May 2018
+Version 0.6.2 (alpha/experimental)
+2 May 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
@@ -55,9 +55,9 @@ Some must be called in a particular sequence.
 in order to recalculate the break multiple, regardless if the threshold has changed.
 
   The addresses for the allowed read and write ranges must be in [0, 0xffff] and
-minAddr must be less than maxAddr (no wrap around). Both endpoints are inclusive. The
-range of a remote command must be entirely within the allowed range or it will not be
-performed.
+minAddr must be less than or equal to maxAddr (no wrap around). Both endpoints are
+inclusive. The range of a remote command must be entirely within the allowed range
+or it will not be performed.
 
   The identifier is a four byte constant that may be used to identify the project.
 The PC obtains its value using the getInfo command.
@@ -127,12 +127,12 @@ con
         The numbers 128-255 are available for custom assignment by the service code. }
     cServiceError               = 64
     cUnknownCommandFormat       = 65
-    cRequestTooLarge            = 66
-    cServiceLowResources        = 67
-    cCommandNotAvailable        = 68
-    cCommandNotImplemented      = 69
-    cCommandNotAllowed          = 70
-    cInvalidCommand             = 71
+    cServiceLowResources        = 66
+    cInvalidCommand             = 67
+    cRequestTooLarge            = 68
+    cCommandNotAvailable        = 69
+    cCommandNotImplemented      = 70
+    cCommandNotAllowed          = 71
     cIncorrectCommandSize       = 72
     cMissingCommandData         = 73
     cTooMuchCommandData         = 74
@@ -181,7 +181,7 @@ con
     cPermissions    = cEnableEverything ^ cEnablePayloadExec
 
     { PeekPoke Custom Error Constants }
-    cAddressForbidden   = 128
+    cAccessError    = 128
 
 
 pub setPins(__rxPin, __txPin)
@@ -284,14 +284,15 @@ __twoBitPeriod  long 0
 org 0
 Entry
 Payload
-                                { First, shift everything into place. Assumptions:
-                                    - The actual content (not address) of the register after initEnd is initShiftStart (nothing
-                                      but org and res'd registers between them).
-                                    - All addresses starting from initShiftLimit and up are res'd and are not shifted. }
-                                mov         _initCount, #initShiftLimit - initShiftStart
-initShift                       mov         initShiftLimit-1, initShiftLimit-1-(initShiftStart - (initEnd + 1))
-                                sub         initShift, initOneInDAndSFields
-                                djnz        _initCount, #initShift
+                                { First, shift the permanent code into place. Definitions:
+                                    InitEnd - the last register of initialization code; it is assumed that the
+                                              next register contains the unshifted contents of InitShiftStart,
+                                    InitShiftStart - the address where the first shifted register will go,
+                                    InitShiftLimit - the address just after the last shifted register. }
+                                mov         _initCount, #InitShiftLimit - InitShiftStart
+:shift                          mov         InitShiftLimit-1, InitShiftLimit-1-(InitShiftStart - (InitEnd + 1))
+                                sub         :shift, initOneInDAndSFields
+                                djnz        _initCount, #:shift
 
                                 { Misc. }
                                 mov         frqb, #1
@@ -335,19 +336,19 @@ initPermissions                 long    cPermissions
 
 initEnableBreakDetectionFlag    long    |< 15
 
-{ initEnd is the last real (not reserved) register before initShiftStart. Its address is used by the initialization shifting code. }
-initEnd
+{ InitEnd - the last register of initialization code, just before the unshifted code. }
+InitEnd
 initOneInDAndSFields            long    $201    'the identical constant in the permanent code can't be used since it is not yet shifted when needed
 
 
 fit cNumPayloadRegisters 'On error: not enough room for init code.
 org cNumPayloadRegisters
 
+{ InitShiftStart - the address of the first shifted register. }
+InitShiftStart
+
 
 { ==========  Begin PropCR Block  ========== }
-
-{ initShiftStart is the first non-res'd register to be shifted into place. }
-initShiftStart
 
 { Settings Notes
     The following registers store some settings. Some settings are stored in other locations (within
@@ -584,7 +585,10 @@ ReceiveCommandFinish
                                 test        payloadSize, #%11               wz      'z=0 leftovers exist
                         if_nz   movd        _RxStoreLeftovers, _rxNextAddr
 
-                                { Evaluate F16 for last byte. These are also spacer instructions that don't change z.
+                                { The code for storing leftover payload bytes is interleaved with the F16 code due to
+                                    the need for spacer instructions, and the way the z-flag is being used. }
+
+                                { Calculate F16 for last byte. These are also spacer instructions that don't change z.
                                     There is no need to compute upper F16 -- it should already be 0 if there are no errors. }
                                 add         _rxF16L, _rxByte
                                 cmpsub      _rxF16L, #255
@@ -976,7 +980,7 @@ _ReadHub                        { readHub and readHubStr can request up to cMaxP
                                 { Verify that the read request is within the allowed range. Assumes no wrap-around. }
                                 cmp         address, minReadAddr        wc      'c=1 read starts in forbidden area
                         if_nc   cmp         maxReadAddr, lastAddress    wc      'c=1 read ends in forbidden area
-                        if_c    jmp         #ReportAddressForbidden
+                        if_c    jmp         #ReportAccessError
 
                         if_z    movs        :nulJump, #:innerJump               'z=1 readHub, so keep going after NUL found
                         if_nz   movs        :nulJump, #SendResponse             'z=0 readHubStr, so stop after NUL found
@@ -1021,7 +1025,7 @@ _writeHub                       { writeHub should have 8 + count bytes in the pa
                                 { Verify that the write is within the allowed range. Assumes no wrap-around. }
                                 cmp         address, minWriteAddr       wc      'c=1 write starts in forbidden area
                         if_nc   cmp         maxWriteAddr, lastAddress   wc      'c=1 write ends in forbidden area
-                        if_c    jmp         #ReportAddressForbidden
+                        if_c    jmp         #ReportAccessError
 
                                 movs        :getLong, #Payload+2
 :outerLoop                      mov         ind, #4
@@ -1142,10 +1146,10 @@ ReportInvalidCommand            mov         Payload, #cInvalidCommand
                                 jmp         #SendCrowError
 
 
-{ ReportAddressForbidden (jmp)
+{ ReportAccessError (jmp)
     This is used specifically when a hub read or write request is not within the allowed range.
 }
-ReportAddressForbidden          mov         Payload, #cAddressForbidden
+ReportAccessError               mov         Payload, #cAccessError
                                 jmp         #SendCrowError
 
 
@@ -1157,6 +1161,10 @@ _Shift                          mov         0-0, 0-0
                                 add         _Shift, kOneInDAndSFields
                                 djnz        ind, #_Shift
 ShiftSeven_ret                  ret
+
+
+{ InitShiftLimit - the address immediately after the last shifted register. }
+InitShiftLimit
 
 
 { Possibilities for freeing registers:
@@ -1173,7 +1181,6 @@ ShiftSeven_ret                  ret
 
 fit 478 'On error: must reduce user code, payload buffer, or admin code.
 org 478
-initShiftLimit          'The initialization shifting code will ignore registers at and above this address.
 
 { Reset Serial Timings
     These store the last known good serial timings.

@@ -62,7 +62,7 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python :: 3',
         ],
-    keywords='propeller',
+    keywords='Parallax Propeller P8X32A',
     project_urls={
         'Source':'https://github.com/chris-siedell/PeekPoke',
         'Homepage':'http://siedell.com/projects/PeekPoke',

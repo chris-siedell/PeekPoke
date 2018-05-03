@@ -1,5 +1,5 @@
 # PeekPoke
-# 1 May 2018
+# 2 May 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -18,13 +18,13 @@ from crow.errors import InvalidCommandError
 from crow.errors import ServiceError
 
 
-__version__ = '0.6.1'
+__version__ = '0.6.2'
 VERSION = __version__
 
 
 class PeekPoke():
 
-    def __init__(self, serial_port_name, *, address=1, port=112):
+    def __init__(self, serial_port_name, address=1, port=112):
         if address < 1 or address > 31:
             raise ValueError("The address must be 1 to 31.")
         if port < 0 or port > 255:
@@ -32,6 +32,7 @@ class PeekPoke():
         self._address = address
         self._port = port
         self._host = Host(serial_port_name)
+        self._host.custom_service_error_callback = self._custom_error_callback
         self._select_propcr_order()
         self._last_good_baudrate = None
         self._info = None
@@ -334,40 +335,47 @@ class PeekPoke():
 
     def _payload_exec(self, block, response_expected=True):
         if len(block) < 8:
-            raise ValueError("The block argument to payload_exec must have at least 8 bytes.")
+            raise ValueError("The block argument to payload_exec must have at least eight bytes.")
         return self._send_command(8, block, response_expected)
         
     def _send_command(self, command_code, data=None, response_expected=True):
         command = bytearray(b'\x70\x70\x00') + command_code.to_bytes(1, 'little')
         if data is not None:
             command += data
-        # todo: rewrite when custom service error callbacks are added to host implementation
-        try:
-            transaction = self._host.send_command(address=self._address, port=self._port, payload=command, response_expected=response_expected)
-        except ServiceError as e:
-            if e.number == 128 and len(data) >= 4:
-                details = {'command_code': command_code, 'hub_address': int.from_bytes(data[0:2], 'little'), 'count': int.from_bytes(data[2:4], 'little')}
-                # Add string version of command.
-                if command_code == 1:
-                    details['command'] = "read_hub"
-                elif command_code == 2:
-                    details['command'] = "write_hub"
-                elif command_code == 3:
-                    details['command'] = "read_hub_str"
-                # Add allowed ranges, if cached.
-                if self._info is not None:
-                    if command_code == 1 or command_code == 3:
-                        details['min_read_address'] = self._info.min_read_address
-                        details['max_read_address'] = self._info.max_read_address
-                    elif command_code == 2:
-                        details['min_write_address'] = self._info.min_write_address
-                        details['max_write_address'] = self._info.max_write_address
-                raise RestrictedAddressError(self._address, self._port, details)
-            else:
-                raise
+        transaction = self._host.send_command(address=self._address, port=self._port, payload=command, response_expected=response_expected, context=command)
         transaction.command_code = command_code
         self._last_good_baudrate = self.baudrate
         return transaction
+
+    def _custom_error_callback(self, address, port, number, details, context):
+        # This method is called if the host receives an error response with
+        #  numbers 128 to 255. The host will raise a generic ServiceError if
+        #  this method returns.
+        # The only expected custom error number is 128.
+        if number == 128:
+            # context is just the command payload, from which we can extract
+            #  details to add to the dictionary.
+            if len(context) < 8:
+                raise ClientError(address, port, "Error number 128 (AccessError) returned from device, but the initiating command payload had less than eight bytes.")
+            details['command_code'] = context[3]
+            details['hub_address'] = int.from_bytes(context[4:6], 'little')
+            details['count'] = int.from_bytes(context[6:8], 'little')
+            # Add string version of command.
+            if context[3] == 1:
+                details['command'] = "read_hub"
+            elif context[3] == 2:
+                details['command'] = "write_hub"
+            elif context[3] == 3:
+                details['command'] = "read_hub_str"
+            # Add allowed ranges, if cached.
+            if self._info is not None:
+                if context[3] == 1 or context[3] == 3:
+                    details['min_read_address'] = self._info.min_read_address
+                    details['max_read_address'] = self._info.max_read_address
+                elif context[3] == 2:
+                    details['min_write_address'] = self._info.min_write_address
+                    details['max_write_address'] = self._info.max_write_address
+            raise AccessError(self._address, self._port, number, details)
 
 
     # Internal Helper Methods
@@ -488,9 +496,9 @@ class PeekPoke():
         return transaction.response[4:8]
 
 
-class RestrictedAddressError(InvalidCommandError):
-    def __init__(self, address, port, details):
-        super().__init__(address, port, details)
+class AccessError(InvalidCommandError):
+    def __init__(self, address, port, number, details):
+        super().__init__(address, port, number, details)
     def __str__(self):
         return "The requested hub memory operation is outside the allowed range. " + super().extra_str()
 
@@ -524,7 +532,7 @@ class PeekPokeInfo():
         self.peekpoke_version = response[29]
 
     def __str__(self):
-        return "Instance info, max_atomic_read: " + str(self.max_atomic_read) + ", max_atomic_write: " + str(self.max_atomic_write) + ", min_read_address: " + str(self.min_read_address) + ", max_read_address: " + str(self.max_read_address) + ", min_write_address: " + str(self.min_write_address) + ", max_write_address: " +str(self.max_write_address) + ", layout_id: [" + self.layout_id.hex() + "], identifier: " + str(self.identifier) + ", par: " + str(self.par) + ", available_commands_bitmask: {:#4x}".format(self.available_commands_bitmask) + ", serial_timings_format: " + str(self.serial_timings_format) + ", peekpoke_version: " + str(self.peekpoke_version) + "."
+        return "PeekPoke instance info, max_atomic_read: " + str(self.max_atomic_read) + ", max_atomic_write: " + str(self.max_atomic_write) + ", min_read_address: " + str(self.min_read_address) + ", max_read_address: " + str(self.max_read_address) + ", min_write_address: " + str(self.min_write_address) + ", max_write_address: " +str(self.max_write_address) + ", layout_id: [" + self.layout_id.hex() + "], identifier: " + str(self.identifier) + ", par: " + str(self.par) + ", available_commands_bitmask: {:#4x}".format(self.available_commands_bitmask) + ", serial_timings_format: " + str(self.serial_timings_format) + ", peekpoke_version: " + str(self.peekpoke_version) + "."
 
 
 class SerialTimings():
