@@ -1,5 +1,5 @@
 # tests001.py
-# 2 May 2018
+# 4 May 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -34,7 +34,7 @@ serial_port_name = sys.argv[1]
 REF_CLKFREQ = 80000000
 HIGHER_BAUD = 115200
 LOWER_BAUD = 57600
-PAYLOAD_BUFF = 4*56
+PAYLOAD_BUFF = 4*60
 BUFF_SIZE = 4000
 MIN_VERSION = 1525211100
 
@@ -43,7 +43,7 @@ def str_from_version(version):
     return datetime.datetime.utcfromtimestamp(version).strftime('%Y-%m-%d %H:%M:%S') + " UTC"
 
 
-print("PeekPoke Tests 001, 2 May 2018")
+print("PeekPoke Tests 001, 4 May 2018")
 print(" Serial port: " + serial_port_name)
 print(" Assumptions:")
 print("  - it is safe to send a break condition,")

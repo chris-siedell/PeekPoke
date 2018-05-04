@@ -1,8 +1,8 @@
 {
 ==================================================
 PeekPoke.spin
-Version 0.6.2 (alpha/experimental)
-3 May 2018
+Version 0.6.3 (alpha/experimental)
+4 May 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
@@ -86,7 +86,7 @@ sending a command.
 con
 
     { Compile-Time Constants }
-    cNumPayloadRegisters        = 56                        'MUST be even
+    cNumPayloadRegisters        = 60                        'MUST be even
     cMaxPayloadSize             = 4*cNumPayloadRegisters
     
     { Default Settings
@@ -172,13 +172,13 @@ con
     cEnablePayloadExec      = |< 8
     cEnableBreakDetection   = |< 15
     cEnableEverything       = $81ff
-    cIdentifier             = 0
 
     { PeekPoke Default Settings }
     cMinReadAddr    = 0
     cMaxReadAddr    = $ffff
     cMinWriteAddr   = 0
     cMaxWriteAddr   = $ffff
+    cIdentifier     = 0
     cPermissions    = cEnableEverything ^ cEnablePayloadExec
 
     { PeekPoke Custom Error Constants }
@@ -676,10 +676,12 @@ AdminGetPortInfo                { The port number of interest is in the fourth b
                         if_c    jmp         #SendCrowError
                                 mov         _admTmp, Payload
                                 shr         _admTmp, #24                    wz      '_admTmp is the requested port number; z=1 admin port 0
+
+                                mov         payloadSize, #4                         'set common default for the Open and Closed buffers
                 
-                                { If z=1 then the requested port number is 0 (Crow admin). }
-                        if_z    mov         sendBufferPointer, #getPortInfoBuffer_Admin
-                        if_z    mov         payloadSize, #16
+                                { If z=1 then the requested port number is 0 (CrowAdmin). In this case there's no
+                                    need to include a service identifier since the response indicates CrowAdmin is running. }
+                        if_z    mov         sendBufferPointer, #getPortInfoBuffer_Open
                         if_z    jmp         #SendResponseAndResetPointer
 
                                 { Check if it is the user port. }
@@ -689,7 +691,6 @@ _AdminCheckUserPort             cmp         _admTmp, #cPort                 wz  
             
                                 { If it is not the admin port or the user port, then the port is closed. }
                         if_nz   mov         sendBufferPointer, #getPortInfoBuffer_Closed
-                        if_nz   mov         payloadSize, #4
 
                                 jmp         #SendResponseAndResetPointer
 
@@ -708,17 +709,14 @@ _AdminOpenPortsList             mov         Payload+1, #cPort                   
 { The following buffers are prepared values for admin responses. If any of these buffers are changed
     remember to update the payload sizes in the above code. }
 
-getPortInfoBuffer_Admin
-long $0303_4143         'initial header (0x43, 0x41, 0x03), port is open, serviceIdentifier included
-long $4309_0700         'serviceIdentifier has offset 7 and length 9; first char is "C"; final string = "CrowAdmin"
-long $4177_6f72         '"rowA"
-long $6e69_6d64         '"dmin"
-
 getPortInfoBuffer_User
 long $0303_4143         'initial header (0x43, 0x41, 0x03), port is open, serviceIdentifier included
 long $5008_0700         'serviceIdentifier has offest 7 and length 8; first char is "P"; final string = "PeekPoke"
 long $506b_6565         '"eekP"
 long $0065_6b6f         '"oke"
+
+getPortInfoBuffer_Open
+long $0103_4143         'initial header (0x43, 0x41, 0x03), port is open, no other details
 
 getPortInfoBuffer_Closed
 long $0003_4143         'initial header (0x43, 0x41, 0x03), port is closed, no other details 
@@ -1170,7 +1168,10 @@ InitShiftLimit
 
 { Possibilities for freeing registers:
     - remove echo/hostPresence (1 register); want to keep ping, getOpenPorts, and getPortInfo
-    - remove serviceIdentifiers to getPortInfo responses (3 registers per service)
+        -> echo is useful for diagnostics since it requires correct PropCR order
+    - remove PeekPoke service identifier (~5 registers, if AdminGetPortInfo is rewritten)
+        -> leaving the service identifier makes it easier to adapt PeekPoke as a serial
+           transportation layer for other projects that may want to uniquely identify themselves
     - have counter B always running (3 registers)
     - use a fall-through scheme with add instructions for reporting errors (1 or 2 registers?)
     - use a single bit period (3 registers)
