@@ -1,7 +1,7 @@
 Links:
 - Python Documentation: https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Python-Documentation/
 - Spin Documentation: https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Spin-Documentation/
-- pip command: `pip install peekpoke`
+- pip command: `pip install peekpoke` or `pip3 install peekpoke`
 - On PyPI: https://pypi.org/project/peekpoke/
 - Project Homepage: http://siedell.com/projects/PeekPoke/
 
@@ -26,7 +26,7 @@ PeekPoke has these additional features:
 
 ## Installation
 
-PeekPoke requires Python 3. It can be installed with the command `pip install peekpoke`, or the package may be downloaded from <https://pypi.org/project/peekpoke/>.  PeekPoke also requires the <https://pypi.org/project/crow-serial/> and <https://pypi.org/project/pyserial/> packages (pip automatically handles these dependencies).
+PeekPoke requires Python 3. It can be installed with the command `pip install peekpoke` (or `pip3 install peekpoke`). Alternatively, the package may be downloaded from <https://pypi.org/project/peekpoke/>. PeekPoke also requires the <https://pypi.org/project/crow-serial/> and <https://pypi.org/project/pyserial/> packages (pip automatically handles these dependencies).
 
 To run PeekPoke on the Propeller include `PeekPoke.spin`  in your project, and use the Spin methods to set up and launch a PeekPoke instance. The latest version of `PeekPoke.spin` can be found at <https://github.com/chris-siedell/PeekPoke>.
 
