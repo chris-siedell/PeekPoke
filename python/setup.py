@@ -1,9 +1,11 @@
-# setup.py for peekpoke
-# 26 April 2018
+# setup.py
+# For peekpoke
+# 4 May 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
 # homepage: http://siedell.com/projects/PeekPoke/
+
 
 from setuptools import setup, find_packages
 from codecs import open
@@ -50,7 +52,7 @@ version = find_version('peekpoke', '__init__.py')
 setup(
     name='peekpoke',
     version=version,
-    description='A development tool for the Parallax Propeller P8X32A.',
+    description='Remote hub memory tool for the Propeller microcontroller.',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='http://siedell.com/projects/PeekPoke',
@@ -65,6 +67,8 @@ setup(
     keywords='Parallax Propeller P8X32A',
     project_urls={
         'Source':'https://github.com/chris-siedell/PeekPoke',
+        'Python Documentation':'https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Python-Documentation',
+        'Spin Documentation':'https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Spin-Documentation',
         'Homepage':'http://siedell.com/projects/PeekPoke',
         },
     packages=find_packages(),

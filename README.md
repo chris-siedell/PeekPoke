@@ -1,57 +1,37 @@
+Links:
+- Python Documentation: https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Python-Documentation/
+- Spin Documentation: https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Spin-Documentation/
+- pip command: `pip install peekpoke`
+- On PyPI: https://pypi.org/project/peekpoke/
+- Project Homepage: http://siedell.com/projects/PeekPoke/
+
 # PeekPoke
+Status: _experimental_
 
-PeekPoke is a utility for reading and writing a Propeller's hub RAM from a PC.
-It consists of two parts: a python package for sending commands from the PC, and
-a PASM program for responding to commands. The PASM program is entirely
-cog-contained after launch.
+PeekPoke is a tool for reading and writing a Propeller's hub memory from a PC. It consists of two parts: a Python module for sending commands from the PC, and a Propeller program for responding to commands.
 
-The Python package may be installed using `pip install peekpoke`, or by downloading
-from PyPI.org at <https://pypi.org/project/peekpoke/>.
+The Python module has methods to read and write hub memory as bytes, strings, integers, and lists of integers.
 
-PeekPoke allows the serial timings to be changed remotely (this feature can be
-disabled). By default, if a break condition is detected the serial parameters will
-be reset to their last known good values.
+The Propeller program can be configured to restrict reads and writes to specific ranges, or to disable writes altogether.
 
-If the payloadExec feature is enabled PeekPoke will allow the PC to execute
-arbitrary code, effectively allowing any command that can be implemented in 65
-registers (plus the static buffer).
+PeekPoke has these additional features:
+- the PAR register may be used to pass a value to the PC,
+- the PC can set the baudrate remotely,
+- the PC can reset the baudrate with a break condition,
+- the Propeller can support baudrates as fast as 26 clocks per bit period,
+- there is a four-byte `identifier` constant that can read by the PC,
+- a four-byte `token` variable is 0 on launch and can be set by the PC,
+- the PC can send PASM code to be executed (disabled by default),
+- the Propeller program is completely cog-contained after launch.
 
-By default, all features of PeekPoke except payloadExec are enabled. There are
-Spin methods that can enable and disable some of the features.
+## Installation
 
-Each PeekPoke instance requires a unique address on the serial line (addresses
-may be 1 to 31, 1 is the default). PeekPoke uses port 112 by default, but this
-may be changed.
+PeekPoke requires Python 3. It can be installed with the command `pip install peekpoke`, or the package may be downloaded from <https://pypi.org/project/peekpoke/>.  PeekPoke also requires the <https://pypi.org/project/crow-serial/> and <https://pypi.org/project/pyserial/> packages (pip automatically handles these dependencies).
 
-The following methods are available to change the default settings before launch.
-Some must be called in a particular sequence.
+To run PeekPoke on the Propeller include `PeekPoke.spin`  in your project, and use the Spin methods to set up and launch a PeekPoke instance. The latest version of `PeekPoke.spin` can be found at <https://github.com/chris-siedell/PeekPoke>.
 
-- `setPins(rxPin, txPin)`
-- `setBaudrate(baudrate)`
-- `setInterbyteTimeoutInMS(milliseconds)` - if called, MUST follow setBaudrate
-- `setInterbyteTimeoutInBitPeriods(count)` - if called, MUST follow setBaudrate
-- `setRecoveryTimeInMS(milliseconds)`
-- `setRecoveryTimeInBitPeriods(count)` - if called, MUST follow setBaudrate
-- `setBreakThresholdInMS(milliseconds)` - MUST be called if setRecoveryTime\* is called
-- `setAddress(address)`
-- `setPort(port)`
-- `enableWriteHub`
-- `disableWriteHub`
-- `enableSetSerialParams`
-- `disableSetSerialParams`
-- `enablePayloadExec`
-- `disablePayloadExec`
-- `enableBreakDetection`
-- `disableBreakDetection`
-  
-If the recovery time is set, then `setBreakThresholdInMS` must be called afterwards
-in order to recalculate the timings constants, regardless if the threshold has changed.
+## Documentation
 
-Calling the above methods has no effect on already launched instances.
-
-`start` takes an argument that is passed to the new instance using the PAR register.
-The PC can use the `get_par` command to obtain its value. 
-
-`start` will not return until the new instance is completely loaded, so calling code
-may immediately prepare to launch another instance.
+Python: https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Python-Documentation
+Spin: https://github.com/chris-siedell/PeekPoke/wiki/PeekPoke-Spin-Documentation
 
