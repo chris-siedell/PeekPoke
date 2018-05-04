@@ -2,7 +2,7 @@
 ==================================================
 PeekPoke.spin
 Version 0.6.2 (alpha/experimental)
-2 May 2018
+3 May 2018
 Chris Siedell
 source: https://github.com/chris-siedell/PeekPoke
 python: https://pypi.org/project/peekpoke/
@@ -100,7 +100,7 @@ con
     cRecoveryTimeInBitPeriods   = 16            'recoveryTime should be greater than a byte period
     cBreakThresholdInMS         = 150
     cAddress                    = 1             'must be 1-31
-    cUserPort                   = 112           'PeekPoke uses 112 by default
+    cPort                       = 112           'must be 1 to 255; PeekPoke uses 112 by default
     
     { Derived Default Settings }
     cTwoBitPeriod = (2*cClkfreq) / cBaudrate
@@ -172,6 +172,7 @@ con
     cEnablePayloadExec      = |< 8
     cEnableBreakDetection   = |< 15
     cEnableEverything       = $81ff
+    cIdentifier             = 0
 
     { PeekPoke Default Settings }
     cMinReadAddr    = 0
@@ -267,7 +268,7 @@ pub init(__cogid, __par)
 
 dat
 
-__twoBitPeriod  long 0
+__twoBitPeriod      long    cTwoBitPeriod 
 
 
 { ==========  Begin Payload Buffer, Initialization, and Entry  ========== }
@@ -625,7 +626,7 @@ _RxCheckAddress         if_nz   cmp         _rxTmp_SH, #cAddress            wz  
                 if_nc_and_nz    jmp         #SendCrowError
 
                                 { Check the port. }
-_RxCheckUserPort                cmp         _rxPort_SH, #cUserPort          wz      'z=1 command is for user code; s-field set before launch
+_RxCheckUserPort                cmp         _rxPort_SH, #cPort              wz      'z=1 command is for user code; s-field set before launch
                         if_z    jmp         #UserCode
                                 cmp         _rxPort_SH, #0                  wz      'z=1 command is for Crow admin (using fall-through to save a jmp)
 
@@ -682,7 +683,7 @@ AdminGetPortInfo                { The port number of interest is in the fourth b
                         if_z    jmp         #SendResponseAndResetPointer
 
                                 { Check if it is the user port. }
-_AdminCheckUserPort             cmp         _admTmp, #cUserPort             wz      'z=1 user port; s-field set before launch
+_AdminCheckUserPort             cmp         _admTmp, #cPort                 wz      'z=1 user port; s-field set before launch
                         if_z    mov         sendBufferPointer, #getPortInfoBuffer_User
                         if_z    mov         payloadSize, #15
             
@@ -698,7 +699,7 @@ _AdminCheckUserPort             cmp         _admTmp, #cUserPort             wz  
 }
 AdminGetOpenPorts
                                 andn        Payload, kFF00_0000                     'set byte four to 0x00 (format is list of open port numbers)
-_AdminOpenPortsList             mov         Payload+1, #cUserPort                   's-field set before launch (admin port 0 gets set automatically)
+_AdminOpenPortsList             mov         Payload+1, #cPort                       's-field set before launch (admin port 0 gets set automatically)
                                 mov         payloadSize, #6
 
                                 jmp         #SendResponse
@@ -1070,7 +1071,7 @@ long (cMaxWriteAddr << 16) | cMinWriteAddr                  'min and max allowed
 layoutID
 long $ddcc_bbaa                                             'todo: change when layout is finalized
 identifier
-long 0                                                      'identifying constant set by user
+long cIdentifier                                            'identifying constant set by user
 parAndAvailability
 long $0000_0000                                             'par and command availability bitmask are set by initializing code
 kOneInDField

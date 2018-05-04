@@ -6,6 +6,7 @@
 *.dat
 
 /ignore/
+/wiki/
 
 */__pycache__/
 
