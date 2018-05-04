@@ -1,5 +1,5 @@
 # PeekPoke
-# 2 May 2018
+# 4 May 2018
 # Chris Siedell
 # source: https://github.com/chris-siedell/PeekPoke
 # python: https://pypi.org/project/peekpoke/
@@ -18,7 +18,7 @@ from crow.errors import InvalidCommandError
 from crow.errors import ServiceError
 
 
-__version__ = '0.6.2'
+__version__ = '0.6.3'
 VERSION = __version__
 
 
