@@ -1,0 +1,133 @@
+======================================
+PeekPoke Protocol v3.txt
+9 May 2018 - in development
+Chris Siedell
+http://siedell.com/projects/PeekPoke/
+======================================
+
+
+Changes From Version 2
+======================
+
+- Added session authentication.
+- Added reset serial timings.
+- Changed break behavior.
+- Specified error responses.
+
+
+Session Authentication
+======================
+
+Version 3 extends the functionality of the session token. There is now the
+option to include the session token within the command. If the included token
+does not match the instance's token the command will not be performed.
+Additionally, some commands may require that a session token be included.
+These changes allow PeekPoke to be used more safely as a communications layer.
+For example, session authentication prevents inappropriate commands from being
+executed after the Propeller has unexpectedly rebooted.
+
+
+Payload Format
+==============
+
+A command payload consists of two parts: the header and the body. The header
+has the same format for all commands, and is always at least four bytes. The
+body format depends on the command, and may be empty.
+
+The first three bytes are always {0x70, 0x70, 0x00}. These serve to identify
+the command as a PeekPoke command. The fourth byte has the following format:
+
+            |7|6|5|4|3|2|1|0|
+    -------------------------
+    Header3 |s|0|0|0|  code |
+
+s is a flag that indicates whether a session token is included as a header
+argument. If included, the next four bytes (i.e. bytes 4 to 7) will be a
+session token. An included session token must match the instance's session
+token before the command may proceed -- if it does not, an InvalidSession
+error response must be sent.
+
+code is an integer that identifies the command to perform.
+
+These are the command codes:
+    0 - getInfo
+    1 - readHub
+    2 - writeHub
+    3 - readHubStr
+    4 - getSerialTimings
+    5 - setSerialTimings
+    6 - getToken
+    7 - setToken
+    8 - payloadExec
+    9 - getOptions
+    10 - setOptions
+    11 - getResetSerialTimings
+    12 - setResetSerialTimings
+    13-14 - reserved
+    15 - reserved for indicating break detection support (see getInfo)
+
+
+Custom Error Numbers
+====================
+
+The PeekPoke protocol assigns these custom service error numbers:
+
+128 - AccessError (->IllegalArgument)
+129 - InvalidSession (->InvalidCommand)
+130 - WrapAroundError (->IllegalArgument)
+
+Their specific meanings are described below.
+
+
+Error Responses
+===============
+
+Crow-level error responses are used for reporting errors.
+
+Some error conditions may be reported using a variety of error numbers. This
+flexibility allows an implementation to balance code size and error
+information. It may be useful to refer to the "Error Heirarchy" section in the
+Crow v2 Standard.
+
+These are the errors a PeekPoke implementation may raise:
+
++ UnknownCommandFormat
+
+This error must be raised if and only if the command payload has less than
+four bytes, or the first three bytes are not {0x70, 0x70, 0x00}.
+
++ InvalidCommand, CommandNotAvailable, CommandNotImplemented, or
+CommandNotAllowed
+
+One of these errors will be raised if the given command can not be performed
+due to the fact that it is not implemented or has been disabled.
+
++ InvalidCommand, IncorrectCommandSize, MissingCommandData, or
+TooMuchCommandData
+
+One of these errors will be raised if the data in the command body has the
+wrong size given the command and arguments.
+
++ InvalidCommand, InvalidArgument, or RequestTooLarge
+
+One of these errors will be raised if the amount of requested data would
+exceed the device's response payload capacity.
+
++ InvalidCommand, InvalidArgument, IllegalArgument, or AccessError (128)
+
+One of these errors will be raised if any part of a hub memory command's
+request is outside the allowed range.
+
++ InvalidCommand, or InvalidSession (129)
+
+One of these errors will be raised if the provided session token does not
+match the instance's session token, or if a session token is required for the
+given command but has not been provided.
+
++ InvalidCommand, InvalidArgument, IllegalArgument, or WrapAroundError (130)
+
+One of these errors will be raised if the hub memory operation would wrap
+around the end of the hub memory space (this is not allowed).
+
+
+
